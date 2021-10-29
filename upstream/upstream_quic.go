@@ -4,16 +4,51 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/joomcode/errorx"
 	"github.com/lucas-clemente/quic-go"
+	"github.com/lucas-clemente/quic-go/logging"
+	"github.com/lucas-clemente/quic-go/qlog"
 	"github.com/miekg/dns"
 )
 
 const handshakeTimeout = time.Second
+
+type qLogWriter struct {
+	filePath string
+}
+
+func (w qLogWriter) Write(p []byte) (n int, err error) {
+	if string(p[:]) == "\n" {
+		return 0, nil
+	}
+	//w.collector.QLogMessage(p)
+	f, err := os.OpenFile(w.filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	n, errr := f.Write(p)
+	f.WriteString("\n")
+	if errr != nil {
+		panic(errr)
+	}
+	return len(p), nil
+}
+
+func (w qLogWriter) Close() error {
+	return nil
+}
+
+func newWriteCloser() io.WriteCloser {
+	return &qLogWriter{filePath: "qlogs.txt"}
+}
 
 //
 // DNS-over-QUIC
@@ -21,6 +56,7 @@ const handshakeTimeout = time.Second
 type dnsOverQUIC struct {
 	boot    *bootstrapper
 	session quic.Session
+	tokenStore quic.TokenStore
 
 	bytesPool    *sync.Pool // byte packets pool
 	sync.RWMutex            // protects session and bytesPool
@@ -203,10 +239,19 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 	}
 
 	addr := udpConn.RemoteAddr().String()
+	// initialize a token store if not exist
+	if p.tokenStore == nil {
+		p.tokenStore = quic.NewLRUTokenStore(10, 50)
+	}
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: handshakeTimeout,
+		Tracer: qlog.NewTracer(func(p logging.Perspective, connectionID []byte) io.WriteCloser {
+			return newWriteCloser()
+		}),
+		TokenStore: p.tokenStore,
+		Versions: []quic.VersionNumber{quic.VersionDraft34},
 	}
-	session, err := quic.DialAddrContext(context.Background(), addr, tlsConfig, quicConfig)
+	session, err := quic.DialAddrEarlyContext(context.Background(), addr, tlsConfig, quicConfig)
 	if err != nil {
 		return nil, errorx.Decorate(err, "failed to open QUIC session to %s", p.Address())
 	}

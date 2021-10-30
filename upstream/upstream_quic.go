@@ -249,7 +249,7 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 			return newWriteCloser()
 		}),
 		TokenStore: p.tokenStore,
-		Versions: []quic.VersionNumber{quic.VersionDraft34},
+		Versions: []quic.VersionNumber{quic.VersionDraft34, quic.VersionDraft32, quic.VersionDraft29, quic.Version1},
 	}
 	session, err := quic.DialAddrEarlyContext(context.Background(), addr, tlsConfig, quicConfig)
 	if err != nil {

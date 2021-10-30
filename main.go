@@ -245,8 +245,30 @@ func run(options *Options) {
 	}
 
 	signalChannel := make(chan os.Signal, 1)
-	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
-	<-signalChannel
+	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
+	infinite:
+	for {
+		sig := <-signalChannel
+		switch sig {
+		case syscall.SIGTERM:
+			break infinite
+		case syscall.SIGINT:
+			break infinite
+		default:
+			err = dnsProxy.Stop()
+			if err != nil {
+				log.Fatalf("cannot stop the DNS proxy due to %s", err)
+			}
+			log.Info("Restarting the DNS proxy server")
+			time.Sleep(time.Second * 2)
+			err = dnsProxy.Start()
+			if err != nil {
+				log.Fatalf("cannot start the DNS proxy due to %s", err)
+			}
+		}
+
+
+	}
 
 	// Stopping the proxy
 	err = dnsProxy.Stop()

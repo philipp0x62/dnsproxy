@@ -4,6 +4,7 @@ package upstream
 import (
 	"crypto/x509"
 	"fmt"
+	"github.com/lucas-clemente/quic-go"
 	"net"
 	"net/url"
 	"strconv"
@@ -46,6 +47,9 @@ type Options struct {
 	// VerifyDNSCryptCertificate is callback to which the DNSCrypt server certificate will be passed.
 	// is called in dnsCrypt.exchangeDNSCrypt; if error != nil then Upstream.Exchange() will return it
 	VerifyDNSCryptCertificate func(cert *dnscrypt.Cert) error
+
+	TokenStore quic.TokenStore
+	ClearSessionCache bool
 }
 
 // Parse "host:port" string and validate port number
@@ -131,8 +135,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 		if err != nil {
 			return nil, errorx.Decorate(err, "couldn't create quic bootstrapper")
 		}
-
-		return &dnsOverQUIC{boot: b}, nil
+		return &dnsOverQUIC{boot: b, tokenStore: opts.TokenStore, clearSessionCache: opts.ClearSessionCache}, nil
 
 	case "tls":
 		if upstreamURL.Port() == "" {

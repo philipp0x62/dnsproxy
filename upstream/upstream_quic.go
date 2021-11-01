@@ -57,6 +57,7 @@ type dnsOverQUIC struct {
 	boot    *bootstrapper
 	session quic.Session
 	tokenStore quic.TokenStore
+	clearSessionCache bool
 
 	bytesPool    *sync.Pool // byte packets pool
 	sync.RWMutex            // protects session and bytesPool
@@ -163,6 +164,7 @@ func (p *dnsOverQUIC) getSession(useCached bool) (quic.Session, error) {
 	var session quic.Session
 	p.RLock()
 	session = p.session
+
 	if session != nil && useCached {
 		p.RUnlock()
 		return session, nil
@@ -239,10 +241,6 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 	}
 
 	addr := udpConn.RemoteAddr().String()
-	// initialize a token store if not exist
-	if p.tokenStore == nil {
-		p.tokenStore = quic.NewLRUTokenStore(10, 50)
-	}
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: handshakeTimeout,
 		Tracer: qlog.NewTracer(func(p logging.Perspective, connectionID []byte) io.WriteCloser {

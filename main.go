@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"github.com/lucas-clemente/quic-go"
 	"io/ioutil"
 	"net"
 	"os"
@@ -226,11 +227,13 @@ func run(options *Options) {
 	}
 
 	// Prepare the proxy server
-	config := createProxyConfig(options)
+	tokenStore := quic.NewLRUTokenStore(5, 50)
+	config := createProxyConfig(options, tokenStore)
 	dnsProxy := &proxy.Proxy{Config: config}
 
 	// Init DNS64 if needed
 	initDNS64(dnsProxy, options)
+
 
 	// Add extra handler if needed
 	if options.IPv6Disabled {
@@ -259,8 +262,11 @@ func run(options *Options) {
 			if err != nil {
 				log.Fatalf("cannot stop the DNS proxy due to %s", err)
 			}
+
 			log.Info("Restarting the DNS proxy server")
-			time.Sleep(time.Second * 2)
+			config = createProxyConfig(options, tokenStore)
+			dnsProxy = &proxy.Proxy{Config: config}
+
 			err = dnsProxy.Start()
 			if err != nil {
 				log.Fatalf("cannot start the DNS proxy due to %s", err)
@@ -278,7 +284,7 @@ func run(options *Options) {
 }
 
 // createProxyConfig creates proxy.Config from the command line arguments
-func createProxyConfig(options *Options) proxy.Config {
+func createProxyConfig(options *Options, tokenStore quic.TokenStore) proxy.Config {
 	// Create the config
 	config := proxy.Config{
 		Ratelimit:       options.Ratelimit,
@@ -297,7 +303,7 @@ func createProxyConfig(options *Options) proxy.Config {
 		MaxGoroutines:          options.MaxGoRoutines,
 	}
 
-	initUpstreams(&config, options)
+	initUpstreams(&config, options, tokenStore)
 	initEDNS(&config, options)
 	initBogusNXDomain(&config, options)
 	initTLSConfig(&config, options)
@@ -308,13 +314,15 @@ func createProxyConfig(options *Options) proxy.Config {
 }
 
 // initUpstreams inits upstream-related config
-func initUpstreams(config *proxy.Config, options *Options) {
+func initUpstreams(config *proxy.Config, options *Options, tokenStore quic.TokenStore) {
 	// Init upstreams
 	upstreams := loadServersList(options.Upstreams)
 	upsOpts := &upstream.Options{
 		InsecureSkipVerify: options.Insecure,
 		Bootstrap:          options.BootstrapDNS,
 		Timeout:            defaultTimeout,
+		TokenStore:			tokenStore,
+		ClearSessionCache:  true,
 	}
 	upstreamConfig, err := proxy.ParseUpstreamsConfig(upstreams, upsOpts)
 	if err != nil {

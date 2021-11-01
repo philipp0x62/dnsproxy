@@ -42,6 +42,8 @@ type dnsOverHTTPS struct {
 	// needed. Clients are safe for concurrent use by multiple goroutines.
 	client      *http.Client
 	clientGuard sync.Mutex
+
+	clearSessionCache bool
 }
 
 // type check
@@ -121,6 +123,11 @@ func (p *dnsOverHTTPS) getClient() (c *http.Client, err error) {
 
 	p.clientGuard.Lock()
 	defer p.clientGuard.Unlock()
+
+	if p.clearSessionCache {
+		p.client = nil
+		p.clearSessionCache = false
+	}
 	if p.client != nil {
 		return p.client, nil
 	}

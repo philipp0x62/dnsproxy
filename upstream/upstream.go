@@ -49,7 +49,6 @@ type Options struct {
 	VerifyDNSCryptCertificate func(cert *dnscrypt.Cert) error
 
 	TokenStore quic.TokenStore
-	ClearSessionCache bool
 }
 
 // Parse "host:port" string and validate port number
@@ -135,7 +134,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 		if err != nil {
 			return nil, errorx.Decorate(err, "couldn't create quic bootstrapper")
 		}
-		return &dnsOverQUIC{boot: b, tokenStore: opts.TokenStore, clearSessionCache: opts.ClearSessionCache}, nil
+		return &dnsOverQUIC{boot: b, tokenStore: opts.TokenStore, clearSessionCache: true}, nil
 
 	case "tls":
 		if upstreamURL.Port() == "" {
@@ -147,7 +146,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 			return nil, errorx.Decorate(err, "couldn't create tls bootstrapper")
 		}
 
-		return &dnsOverTLS{boot: b, clearSessionCache: opts.ClearSessionCache}, nil
+		return &dnsOverTLS{boot: b, clearSessionCache: true}, nil
 
 	case "https":
 		if upstreamURL.Port() == "" {
@@ -159,7 +158,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 			return nil, errorx.Decorate(err, "couldn't create tls bootstrapper")
 		}
 
-		return &dnsOverHTTPS{boot: b}, nil
+		return &dnsOverHTTPS{boot: b, clearSessionCache: true}, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported URL scheme: %s", upstreamURL.Scheme)

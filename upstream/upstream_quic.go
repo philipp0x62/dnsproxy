@@ -164,7 +164,13 @@ func (p *dnsOverQUIC) getSession(useCached bool) (quic.Session, error) {
 	var session quic.Session
 	p.RLock()
 	session = p.session
-
+	// When first initialized after restart, create a new session
+	if p.clearSessionCache {
+		p.Lock()
+		p.clearSessionCache = false
+		p.Unlock()
+		useCached = false
+	}
 	if session != nil && useCached {
 		p.RUnlock()
 		return session, nil

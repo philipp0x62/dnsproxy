@@ -147,7 +147,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 			return nil, errorx.Decorate(err, "couldn't create tls bootstrapper")
 		}
 
-		return &dnsOverTLS{boot: b}, nil
+		return &dnsOverTLS{boot: b, clearSessionCache: opts.ClearSessionCache}, nil
 
 	case "https":
 		if upstreamURL.Port() == "" {

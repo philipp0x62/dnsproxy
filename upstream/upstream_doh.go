@@ -122,12 +122,13 @@ func (p *dnsOverHTTPS) getClient() (c *http.Client, err error) {
 	startTime := time.Now()
 
 	p.clientGuard.Lock()
+	if p.clearSessionCache {
+		p.clearSessionCache = false
+		p.client = nil
+	}
+
 	defer p.clientGuard.Unlock()
 
-	if p.clearSessionCache {
-		p.client = nil
-		p.clearSessionCache = false
-	}
 	if p.client != nil {
 		return p.client, nil
 	}

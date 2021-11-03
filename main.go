@@ -252,12 +252,7 @@ func run(options *Options) {
 	infinite:
 	for {
 		sig := <-signalChannel
-		switch sig {
-		case syscall.SIGTERM:
-			break infinite
-		case syscall.SIGINT:
-			break infinite
-		default:
+		if sig == syscall.SIGUSR1 {
 			err = dnsProxy.Stop()
 			if err != nil {
 				log.Fatalf("cannot stop the DNS proxy due to %s", err)
@@ -266,11 +261,19 @@ func run(options *Options) {
 			log.Info("Restarting the DNS proxy server")
 			config = createProxyConfig(options, tokenStore)
 			dnsProxy = &proxy.Proxy{Config: config}
-
+			// Init DNS64 if needed
+			initDNS64(dnsProxy, options)
+			// Add extra handler if needed
+			if options.IPv6Disabled {
+				ipv6Configuration := ipv6Configuration{ipv6Disabled: options.IPv6Disabled}
+				dnsProxy.RequestHandler = ipv6Configuration.handleDNSRequest
+			}
 			err = dnsProxy.Start()
 			if err != nil {
 				log.Fatalf("cannot start the DNS proxy due to %s", err)
 			}
+		} else {
+			break infinite
 		}
 
 

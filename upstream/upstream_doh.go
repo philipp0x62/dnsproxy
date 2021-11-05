@@ -64,6 +64,12 @@ func (p *dnsOverHTTPS) Exchange(m *dns.Msg) (*dns.Msg, error) {
 	return r, err
 }
 
+func (p* dnsOverHTTPS) Reset() {
+	p.clientGuard.Lock()
+	p.clearSessionCache = true
+	p.clientGuard.Unlock()
+}
+
 // exchangeHTTPSClient sends the DNS query to a DOH resolver using the specified
 // http.Client instance.
 func (p *dnsOverHTTPS) exchangeHTTPSClient(m *dns.Msg, client *http.Client) (*dns.Msg, error) {

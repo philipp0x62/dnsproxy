@@ -80,6 +80,12 @@ func (p *dnsOverTLS) Exchange(m *dns.Msg) (*dns.Msg, error) {
 	return reply, err
 }
 
+func (p *dnsOverTLS) Reset() {
+	p.RLock()
+	p.clearSessionCache = true
+	p.RUnlock()
+}
+
 func (p *dnsOverTLS) exchangeConn(poolConn net.Conn, m *dns.Msg) (*dns.Msg, error) {
 	c := dns.Conn{Conn: poolConn}
 	err := c.WriteMsg(m)

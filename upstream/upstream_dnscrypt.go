@@ -47,6 +47,9 @@ func (p *dnsCrypt) Exchange(m *dns.Msg) (*dns.Msg, error) {
 	return reply, err
 }
 
+func (p *dnsCrypt) Reset() {
+}
+
 // exchangeDNSCrypt attempts to send the DNS query and returns the response
 func (p *dnsCrypt) exchangeDNSCrypt(m *dns.Msg) (*dns.Msg, error) {
 	var client *dnscrypt.Client

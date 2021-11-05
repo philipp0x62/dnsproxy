@@ -22,6 +22,7 @@ import (
 type Upstream interface {
 	Exchange(m *dns.Msg) (*dns.Msg, error)
 	Address() string
+	Reset()
 }
 
 // Options for AddressToUpstream func
@@ -134,7 +135,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 		if err != nil {
 			return nil, errorx.Decorate(err, "couldn't create quic bootstrapper")
 		}
-		return &dnsOverQUIC{boot: b, tokenStore: opts.TokenStore, clearSessionCache: true}, nil
+		return &dnsOverQUIC{boot: b, tokenStore: opts.TokenStore, clearSessionCache: false}, nil
 
 	case "tls":
 		if upstreamURL.Port() == "" {
@@ -146,7 +147,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 			return nil, errorx.Decorate(err, "couldn't create tls bootstrapper")
 		}
 
-		return &dnsOverTLS{boot: b, clearSessionCache: true}, nil
+		return &dnsOverTLS{boot: b, clearSessionCache: false}, nil
 
 	case "https":
 		if upstreamURL.Port() == "" {
@@ -158,7 +159,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 			return nil, errorx.Decorate(err, "couldn't create tls bootstrapper")
 		}
 
-		return &dnsOverHTTPS{boot: b, clearSessionCache: true}, nil
+		return &dnsOverHTTPS{boot: b, clearSessionCache: false}, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported URL scheme: %s", upstreamURL.Scheme)

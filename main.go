@@ -246,6 +246,7 @@ func run(options *Options) {
 	if err != nil {
 		log.Fatalf("cannot start the DNS proxy due to %s", err)
 	}
+	upstreamZero := config.UpstreamConfig.Upstreams[0]
 
 	signalChannel := make(chan os.Signal, 1)
 	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
@@ -253,25 +254,8 @@ func run(options *Options) {
 	for {
 		sig := <-signalChannel
 		if sig == syscall.SIGUSR1 {
-			err = dnsProxy.Stop()
-			if err != nil {
-				log.Fatalf("cannot stop the DNS proxy due to %s", err)
-			}
-
-			log.Info("Restarting the DNS proxy server")
-			config = createProxyConfig(options, tokenStore)
-			dnsProxy = &proxy.Proxy{Config: config}
-			// Init DNS64 if needed
-			initDNS64(dnsProxy, options)
-			// Add extra handler if needed
-			if options.IPv6Disabled {
-				ipv6Configuration := ipv6Configuration{ipv6Disabled: options.IPv6Disabled}
-				dnsProxy.RequestHandler = ipv6Configuration.handleDNSRequest
-			}
-			err = dnsProxy.Start()
-			if err != nil {
-				log.Fatalf("cannot start the DNS proxy due to %s", err)
-			}
+			log.Info("Creating new session")
+			upstreamZero.Reset()
 		} else {
 			break infinite
 		}
@@ -357,6 +341,7 @@ func initUpstreams(config *proxy.Config, options *Options, tokenStore quic.Token
 		}
 		config.Fallbacks = fallbacks
 	}
+
 }
 
 // initEDNS inits EDNS-related config

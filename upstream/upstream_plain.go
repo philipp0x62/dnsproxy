@@ -52,3 +52,6 @@ func (p *plainDNS) Exchange(m *dns.Msg) (*dns.Msg, error) {
 
 	return reply, err
 }
+
+func (p *plainDNS) Reset() {
+}

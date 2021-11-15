@@ -13,6 +13,11 @@ import (
 	"github.com/lucas-clemente/quic-go/logging"
 )
 
+type VersionInfo struct {
+	Version                    VersionNumber
+	RemoteAddr                 net.Addr
+}
+
 type client struct {
 	conn sendConn
 	// If the client is created with DialAddr, we create a packet conn.
@@ -56,7 +61,7 @@ func DialAddr(
 	addr string,
 	tlsConf *tls.Config,
 	config *Config,
-) (Session, error) {
+) (Session, VersionInfo, error) {
 	return DialAddrContext(context.Background(), addr, tlsConf, config)
 }
 
@@ -68,7 +73,7 @@ func DialAddrEarly(
 	addr string,
 	tlsConf *tls.Config,
 	config *Config,
-) (EarlySession, error) {
+) (EarlySession, VersionInfo, error) {
 	return DialAddrEarlyContext(context.Background(), addr, tlsConf, config)
 }
 
@@ -79,13 +84,13 @@ func DialAddrEarlyContext(
 	addr string,
 	tlsConf *tls.Config,
 	config *Config,
-) (EarlySession, error) {
-	sess, err := dialAddrContext(ctx, addr, tlsConf, config, true)
+) (EarlySession, VersionInfo, error) {
+	sess, VersionInformation, err := dialAddrContext(ctx, addr, tlsConf, config, true)
 	if err != nil {
-		return nil, err
+		return nil, VersionInformation, err
 	}
 	utils.Logger.WithPrefix(utils.DefaultLogger, "client").Debugf("Returning early session")
-	return sess, nil
+	return sess, VersionInformation, nil
 }
 
 // DialAddrContext establishes a new QUIC connection to a server using the provided context.
@@ -95,7 +100,7 @@ func DialAddrContext(
 	addr string,
 	tlsConf *tls.Config,
 	config *Config,
-) (Session, error) {
+) (Session, VersionInfo, error) {
 	return dialAddrContext(ctx, addr, tlsConf, config, false)
 }
 
@@ -105,14 +110,14 @@ func dialAddrContext(
 	tlsConf *tls.Config,
 	config *Config,
 	use0RTT bool,
-) (quicSession, error) {
+) (quicSession, VersionInfo, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
-		return nil, err
+		return nil, VersionInfo{}, err
 	}
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
-		return nil, err
+		return nil, VersionInfo{}, err
 	}
 	return dialContext(ctx, udpConn, udpAddr, addr, tlsConf, config, use0RTT, true)
 }
@@ -131,7 +136,7 @@ func Dial(
 	host string,
 	tlsConf *tls.Config,
 	config *Config,
-) (Session, error) {
+) (Session, VersionInfo, error) {
 	return dialContext(context.Background(), pconn, remoteAddr, host, tlsConf, config, false, false)
 }
 
@@ -146,7 +151,7 @@ func DialEarly(
 	host string,
 	tlsConf *tls.Config,
 	config *Config,
-) (EarlySession, error) {
+) (EarlySession, VersionInfo, error) {
 	return DialEarlyContext(context.Background(), pconn, remoteAddr, host, tlsConf, config)
 }
 
@@ -159,7 +164,7 @@ func DialEarlyContext(
 	host string,
 	tlsConf *tls.Config,
 	config *Config,
-) (EarlySession, error) {
+) (EarlySession, VersionInfo, error) {
 	return dialContext(ctx, pconn, remoteAddr, host, tlsConf, config, true, false)
 }
 
@@ -172,7 +177,7 @@ func DialContext(
 	host string,
 	tlsConf *tls.Config,
 	config *Config,
-) (Session, error) {
+) (Session, VersionInfo, error) {
 	return dialContext(ctx, pconn, remoteAddr, host, tlsConf, config, false, false)
 }
 
@@ -185,21 +190,21 @@ func dialContext(
 	config *Config,
 	use0RTT bool,
 	createdPacketConn bool,
-) (quicSession, error) {
+) (quicSession, VersionInfo, error) {
 	if tlsConf == nil {
-		return nil, errors.New("quic: tls.Config not set")
+		return nil, VersionInfo{}, errors.New("quic: tls.Config not set")
 	}
 	if err := validateConfig(config); err != nil {
-		return nil, err
+		return nil, VersionInfo{}, err
 	}
 	config = populateClientConfig(config, createdPacketConn)
 	packetHandlers, err := getMultiplexer().AddConn(pconn, config.ConnectionIDLength, config.StatelessResetKey, config.Tracer)
 	if err != nil {
-		return nil, err
+		return nil, VersionInfo{}, err
 	}
 	c, err := newClient(pconn, remoteAddr, config, tlsConf, host, use0RTT, createdPacketConn)
 	if err != nil {
-		return nil, err
+		return nil, VersionInfo{}, err
 	}
 	c.packetHandlers = packetHandlers
 
@@ -215,10 +220,15 @@ func dialContext(
 		c.tracer.StartedConnection(c.conn.LocalAddr(), c.conn.RemoteAddr(), c.srcConnID, c.destConnID)
 	}
 	if err := c.dial(ctx); err != nil {
-		return nil, err
+		return nil, VersionInfo{}, err
 	}
-	return c.session, nil
+	VersionInformation := &VersionInfo{
+		Version: c.version,
+		RemoteAddr: c.conn.RemoteAddr(),
+	}
+	return c.session, *VersionInformation, nil
 }
+
 
 func newClient(
 	pconn net.PacketConn,

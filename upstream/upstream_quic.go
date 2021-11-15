@@ -58,6 +58,7 @@ type dnsOverQUIC struct {
 	session quic.Session
 	tokenStore quic.TokenStore
 	clearSessionCache bool
+	version quic.VersionNumber
 
 	bytesPool    *sync.Pool // byte packets pool
 	sync.RWMutex            // protects session and bytesPool
@@ -238,7 +239,7 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 
 	// we're using bootstrapped address instead of what's passed to the function
 	// it does not create an actual connection, but it helps us determine
-	// what IP is actually reachable (when there're v4/v6 addresses)
+	// what IP is actually reachable (when there are v4/v6 addresses)
 	rawConn, err := dialContext(context.TODO(), "udp", "")
 	if err != nil {
 		return nil, err
@@ -251,6 +252,12 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 		return nil, fmt.Errorf("failed to open connection to %s", p.Address())
 	}
 
+	versions := []quic.VersionNumber{quic.VersionDraft34, quic.VersionDraft32, quic.VersionDraft29, quic.Version1}
+	version := p.version
+	if version != 0x0 {
+		versions = []quic.VersionNumber{version}
+	}
+	fmt.Println(versions)
 	addr := udpConn.RemoteAddr().String()
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: handshakeTimeout,
@@ -258,13 +265,13 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 			return newWriteCloser()
 		}),
 		TokenStore: p.tokenStore,
-		Versions: []quic.VersionNumber{quic.VersionDraft34, quic.VersionDraft32, quic.VersionDraft29, quic.Version1},
-		MaxIdleTimeout: time.Second * 3000,
+		Versions: versions,
+		MaxIdleTimeout: time.Second * 3000000,
 	}
-	session, err := quic.DialAddrContext(context.Background(), addr, tlsConfig, quicConfig)
+	session, versionInfo, err := quic.DialAddrContext(context.Background(), addr, tlsConfig, quicConfig)
 	if err != nil {
 		return nil, errorx.Decorate(err, "failed to open QUIC session to %s", p.Address())
 	}
-
+	p.version = versionInfo.Version
 	return session, nil
 }

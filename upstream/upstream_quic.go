@@ -252,12 +252,13 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 		return nil, fmt.Errorf("failed to open connection to %s", p.Address())
 	}
 
+	// Store version information
 	versions := []quic.VersionNumber{quic.VersionDraft34, quic.VersionDraft32, quic.VersionDraft29, quic.Version1}
 	version := p.version
 	if version != 0x0 {
 		versions = []quic.VersionNumber{version}
 	}
-	fmt.Println(versions)
+
 	addr := udpConn.RemoteAddr().String()
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: handshakeTimeout,

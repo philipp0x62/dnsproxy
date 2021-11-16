@@ -267,7 +267,7 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 		}),
 		TokenStore: p.tokenStore,
 		Versions: versions,
-		MaxIdleTimeout: time.Second * 3000000,
+		MaxIdleTimeout: time.Millisecond * 3000000,
 	}
 	session, versionInfo, err := quic.DialAddrContext(context.Background(), addr, tlsConfig, quicConfig)
 	if err != nil {

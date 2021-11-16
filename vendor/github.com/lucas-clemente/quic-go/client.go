@@ -115,7 +115,7 @@ func dialAddrContext(
 	if err != nil {
 		return nil, VersionInfo{}, err
 	}
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 40000})
 	if err != nil {
 		return nil, VersionInfo{}, err
 	}

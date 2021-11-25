@@ -135,7 +135,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 		if err != nil {
 			return nil, errorx.Decorate(err, "couldn't create quic bootstrapper")
 		}
-		return &dnsOverQUIC{boot: b, tokenStore: opts.TokenStore, clearSessionCache: false}, nil
+		return &dnsOverQUIC{boot: b, tokenStore: opts.TokenStore}, nil
 
 	case "tls":
 		if upstreamURL.Port() == "" {
@@ -147,7 +147,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 			return nil, errorx.Decorate(err, "couldn't create tls bootstrapper")
 		}
 
-		return &dnsOverTLS{boot: b, clearSessionCache: false}, nil
+		return &dnsOverTLS{boot: b}, nil
 
 	case "https":
 		if upstreamURL.Port() == "" {
@@ -159,7 +159,7 @@ func urlToUpstream(upstreamURL *url.URL, opts *Options) (Upstream, error) {
 			return nil, errorx.Decorate(err, "couldn't create tls bootstrapper")
 		}
 
-		return &dnsOverHTTPS{boot: b, clearSessionCache: false}, nil
+		return &dnsOverHTTPS{boot: b}, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported URL scheme: %s", upstreamURL.Scheme)

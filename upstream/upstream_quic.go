@@ -57,7 +57,6 @@ type dnsOverQUIC struct {
 	boot    *bootstrapper
 	session quic.Session
 	tokenStore quic.TokenStore
-	clearSessionCache bool
 	version quic.VersionNumber
 
 	bytesPool    *sync.Pool // byte packets pool
@@ -66,7 +65,8 @@ type dnsOverQUIC struct {
 
 func (p *dnsOverQUIC) Reset() {
 	p.RLock()
-	p.clearSessionCache = true
+	session := p.session
+	_ = session.CloseWithError(0, "")
 	p.RUnlock()
 }
 
@@ -172,11 +172,7 @@ func (p *dnsOverQUIC) getSession(useCached bool) (quic.Session, error) {
 
 	p.RLock()
 	session = p.session
-	// When first initialized after restart, create a new session
-	if 	p.clearSessionCache	{
-		p.clearSessionCache = false
-		useCached = false
-	}
+
 	if session != nil && useCached {
 		p.RUnlock()
 		return session, nil
@@ -269,7 +265,7 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 		Versions: versions,
 		MaxIdleTimeout: time.Millisecond * 3000000,
 	}
-	session, versionInfo, err := quic.DialAddrContext(context.Background(), addr, tlsConfig, quicConfig)
+	session, versionInfo, err := quic.DialAddrContext(context.Background(), addr, tlsConfig, quicConfig, 40000)
 	if err != nil {
 		return nil, errorx.Decorate(err, "failed to open QUIC session to %s", p.Address())
 	}

@@ -15,7 +15,6 @@ import (
 type dnsOverTLS struct {
 	boot *bootstrapper
 	pool *TLSPool
-	clearSessionCache bool
 
 	sync.RWMutex // protects pool
 }
@@ -28,11 +27,6 @@ func (p *dnsOverTLS) Address() string { return p.boot.URL.String() }
 func (p *dnsOverTLS) Exchange(m *dns.Msg) (*dns.Msg, error) {
 	var pool *TLSPool
 	p.RLock()
-	// Delete the TLS pool when first initializing after restart
-	if p.clearSessionCache {
-		p.pool = nil
-		p.clearSessionCache = false
-	}
 	pool = p.pool
 	p.RUnlock()
 	if pool == nil {
@@ -82,7 +76,7 @@ func (p *dnsOverTLS) Exchange(m *dns.Msg) (*dns.Msg, error) {
 
 func (p *dnsOverTLS) Reset() {
 	p.RLock()
-	p.clearSessionCache = true
+	p.pool = nil
 	p.RUnlock()
 }
 

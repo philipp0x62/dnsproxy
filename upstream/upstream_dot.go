@@ -65,12 +65,11 @@ func (p *dnsOverTLS) Exchange(m *dns.Msg) (*dns.Msg, error) {
 		reply, err = p.exchangeConn(poolConn, m)
 		logFinish(p.Address(), err)
 	}
-
-	if err == nil {
-		p.RLock()
+	p.RLock()
+	if err == nil && p.pool != nil {
 		p.pool.Put(poolConn)
-		p.RUnlock()
 	}
+	p.RUnlock()
 	return reply, err
 }
 

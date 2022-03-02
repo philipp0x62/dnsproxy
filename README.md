@@ -283,10 +283,11 @@ In the example below, we use AdGuard DNS server that returns `0.0.0.0` for block
 ## Modifications
 ### Advanced DoQ Support
 The client now uses a token store for tokens from NEW_TOKEN frames. They are used in subsequent
-connections to the same upstream for address validation 
-(see https://www.rfc-editor.org/rfc/rfc9000.html#name-address-validation). Additionally, the proxy
+connections to the same upstream for [address validation](https://www.rfc-editor.org/rfc/rfc9000.html#name-address-validation). Additionally, the proxy
 uses source port UDP/4000 for every outgoing DoQ connection, to circumvent an issue with resolvers 
 behind Anycast addresses. This disables the possibility to have multiple DoQ connections open at the same time.
+Furthermore this DNS Proxy implementation stores [QLogs](https://dl.acm.org/doi/abs/10.1145/3404868.3406663) 
+of DoQ queries inside `qlogs.txt`.
 ### Session Reset
 We implement a Golang channel that listens for an internal SIGUSR1 signal.
 This is comparable to pressing Ctrl+C in the console, which sends a SIGINT signal to all

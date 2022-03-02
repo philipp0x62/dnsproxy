@@ -8,6 +8,7 @@
 A simple DNS proxy server that supports all existing DNS protocols including `DNS-over-TLS`, `DNS-over-HTTPS`, `DNSCrypt`, and `DNS-over-QUIC`. Moreover, it can work as a `DNS-over-HTTPS`, `DNS-over-TLS` or `DNS-over-QUIC` server.
 
 > Note that `DNS-over-QUIC` support is experimental, don't use it in production.
+> This is a modified version of DNS Proxy, the modifications are listed in the last Section of this Readme.
 
 - [How to build](#how-to-build)
 - [Usage](#usage)
@@ -21,6 +22,9 @@ A simple DNS proxy server that supports all existing DNS protocols including `DN
   - [Specifying upstreams for domains](#specifying-upstreams-for-domains)
   - [EDNS Client Subnet](#edns-client-subnet)
   - [Bogus NXDomain](#bogus-nxdomain)
+- [Modifications](#modifications)
+  - [Advanced DoQ Support](#advanced-doq-support)
+  - [Session Reset](#session-reset)
 
 ## How to build
 
@@ -276,3 +280,16 @@ In the example below, we use AdGuard DNS server that returns `0.0.0.0` for block
 ```
 ./dnsproxy -u 94.140.14.14:53 --bogus-nxdomain=0.0.0.0
 ```
+## Modifications
+### Advanced DoQ Support
+The client now uses a token store for tokens from NEW_TOKEN frames. They are used in subsequent
+connections to the same upstream for address validation 
+(see https://www.rfc-editor.org/rfc/rfc9000.html#name-address-validation). Additionally, the proxy
+uses source port UDP/4000 for every outgoing DoQ connection, to circumvent an issue with resolvers 
+behind Anycast addresses. This disables the possibility to have multiple DoQ connections open at the same time.
+### Session Reset
+We implement a Golang channel that listens for an internal SIGUSR1 signal.
+This is comparable to pressing Ctrl+C in the console, which sends a SIGINT signal to all
+foreground processes, though that signal is handled differently by the tool. When the
+process captures this signal, the session is closed but the process keeps running. 
+This resets any DoQ, DoH and DoT sessions.

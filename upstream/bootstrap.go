@@ -229,13 +229,16 @@ func (n *bootstrapper) createDialContext(addresses []string) (dialContext dialHa
 		// Return first connection without error
 		// Note that we're using bootstrapped resolverAddress instead of what's passed to the function
 		for _, resolverAddress := range addresses {
-			log.Tracef("Dialing to %s", resolverAddress)
 			start := time.Now()
 			con, err := dialer.DialContext(ctx, network, resolverAddress)
 			elapsed := time.Since(start)
 
 			if err == nil {
 				log.Tracef("dialer has successfully initialized connection to %s in %s", resolverAddress, elapsed)
+				if addr != "" {
+					log.Tracef("\nEstablished DoH connection for: unknown\nTime: %v\n", time.Now().Format(time.StampMilli))
+					log.Tracef("\nSending DoH query: unknown\nTime: %v\n", time.Now().Format(time.StampMilli))
+				}
 				return con, err
 			}
 			errs = append(errs, err)

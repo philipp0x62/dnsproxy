@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/AdguardTeam/golibs/log"
 	"io"
 	"net"
 	"os"
@@ -54,10 +55,10 @@ func newWriteCloser() io.WriteCloser {
 // DNS-over-QUIC
 //
 type dnsOverQUIC struct {
-	boot    *bootstrapper
-	session quic.Session
+	boot       *bootstrapper
+	session    quic.Session
 	tokenStore quic.TokenStore
-	version quic.VersionNumber
+	version    quic.VersionNumber
 
 	bytesPool    *sync.Pool // byte packets pool
 	sync.RWMutex            // protects session and bytesPool
@@ -76,6 +77,8 @@ var _ Upstream = &dnsOverQUIC{}
 func (p *dnsOverQUIC) Address() string { return p.boot.URL.String() }
 
 func (p *dnsOverQUIC) Exchange(m *dns.Msg) (*dns.Msg, error) {
+	q := m.Question[0].String()
+	log.Tracef("\nEstablishing DoQ connection for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
 	session, err := p.getSession(true)
 	if err != nil {
 		return nil, err
@@ -113,6 +116,9 @@ func (p *dnsOverQUIC) Exchange(m *dns.Msg) (*dns.Msg, error) {
 		return nil, errorx.Decorate(err, "failed to open new stream to %s", p.Address())
 	}
 
+	log.Tracef("\nEstablished DoQ connection for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
+	log.Tracef("\nSending DoQ query: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
+
 	buf, err := m.Pack()
 	if err != nil {
 		return nil, err
@@ -142,6 +148,7 @@ func (p *dnsOverQUIC) Exchange(m *dns.Msg) (*dns.Msg, error) {
 
 	reply = new(dns.Msg)
 	err = reply.Unpack(respBuf)
+	log.Tracef("\nDoQ answer received for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
 	if err != nil {
 		return nil, errorx.Decorate(err, "failed to unpack response from %s", p.Address())
 	}
@@ -261,8 +268,8 @@ func (p *dnsOverQUIC) openSession() (quic.Session, error) {
 		Tracer: qlog.NewTracer(func(p logging.Perspective, connectionID []byte) io.WriteCloser {
 			return newWriteCloser()
 		}),
-		TokenStore: p.tokenStore,
-		Versions: versions,
+		TokenStore:     p.tokenStore,
+		Versions:       versions,
 		MaxIdleTimeout: time.Millisecond * 3000000,
 	}
 	session, versionInfo, err := quic.DialAddrContext(context.Background(), addr, tlsConfig, quicConfig, 40000)

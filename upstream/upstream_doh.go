@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/base64"
 	"fmt"
+	"github.com/AdguardTeam/golibs/log"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -50,6 +51,8 @@ var _ Upstream = &dnsOverHTTPS{}
 func (p *dnsOverHTTPS) Address() string { return p.boot.URL.String() }
 
 func (p *dnsOverHTTPS) Exchange(m *dns.Msg) (*dns.Msg, error) {
+	q := m.Question[0].String()
+	log.Tracef("\nEstablishing DoH connection for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
 	client, err := p.getClient()
 	if err != nil {
 		return nil, errorx.Decorate(err, "couldn't initialize HTTP client or transport")
@@ -57,12 +60,13 @@ func (p *dnsOverHTTPS) Exchange(m *dns.Msg) (*dns.Msg, error) {
 
 	logBegin(p.Address(), m)
 	r, err := p.exchangeHTTPSClient(m, client)
+	log.Tracef("\nDoH answer received for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
 	logFinish(p.Address(), err)
 
 	return r, err
 }
 
-func (p* dnsOverHTTPS) Reset() {
+func (p *dnsOverHTTPS) Reset() {
 	p.clientGuard.Lock()
 	p.client = nil
 	p.clientGuard.Unlock()

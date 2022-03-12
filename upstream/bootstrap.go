@@ -224,6 +224,10 @@ func (n *bootstrapper) createDialContext(addresses []string) (dialContext dialHa
 	}
 
 	dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr != "" {
+			log.Tracef("\n\033[34mEstablishing new DoH connection\nTime: %v\n\033[0m", time.Now().Format(time.StampMilli))
+		}
+
 		errs := []error{}
 
 		// Return first connection without error
@@ -236,8 +240,7 @@ func (n *bootstrapper) createDialContext(addresses []string) (dialContext dialHa
 			if err == nil {
 				log.Tracef("dialer has successfully initialized connection to %s in %s", resolverAddress, elapsed)
 				if addr != "" {
-					log.Tracef("\nEstablished DoH connection for: unknown\nTime: %v\n", time.Now().Format(time.StampMilli))
-					log.Tracef("\nSending DoH query: unknown\nTime: %v\n", time.Now().Format(time.StampMilli))
+					log.Tracef("\n\033[34mEstablished new DoH connection\nTime: %v\n\033[0m", time.Now().Format(time.StampMilli))
 				}
 				return con, err
 			}

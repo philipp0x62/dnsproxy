@@ -78,7 +78,7 @@ func (p *dnsOverQUIC) Address() string { return p.boot.URL.String() }
 
 func (p *dnsOverQUIC) Exchange(m *dns.Msg) (*dns.Msg, error) {
 	q := m.Question[0].String()
-	log.Tracef("\nEstablishing DoQ connection for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
+	log.Tracef("\n\033[34mStarting DoQ exchange for: %s\nTime: %v\n\033[0m", q, time.Now().Format(time.StampMilli))
 	session, err := p.getSession(true)
 	if err != nil {
 		return nil, err
@@ -116,9 +116,6 @@ func (p *dnsOverQUIC) Exchange(m *dns.Msg) (*dns.Msg, error) {
 		return nil, errorx.Decorate(err, "failed to open new stream to %s", p.Address())
 	}
 
-	log.Tracef("\nEstablished DoQ connection for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
-	log.Tracef("\nSending DoQ query: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
-
 	buf, err := m.Pack()
 	if err != nil {
 		return nil, err
@@ -148,7 +145,7 @@ func (p *dnsOverQUIC) Exchange(m *dns.Msg) (*dns.Msg, error) {
 
 	reply = new(dns.Msg)
 	err = reply.Unpack(respBuf)
-	log.Tracef("\nDoQ answer received for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
+	log.Tracef("\n\033[34mDoQ answer received for: %s\nTime: %v\n\033[0m", q, time.Now().Format(time.StampMilli))
 	if err != nil {
 		return nil, errorx.Decorate(err, "failed to unpack response from %s", p.Address())
 	}
@@ -184,6 +181,7 @@ func (p *dnsOverQUIC) getSession(useCached bool) (quic.Session, error) {
 		p.RUnlock()
 		return session, nil
 	}
+	log.Tracef("\n\033[34mEstablishing new DoQ connection\nTime: %v\n\033[0m", time.Now().Format(time.StampMilli))
 	if session != nil {
 		// we're recreating the session, let's create a new one
 		_ = session.CloseWithError(0, "")
@@ -207,6 +205,7 @@ func (p *dnsOverQUIC) getSession(useCached bool) (quic.Session, error) {
 		}
 	}
 	p.session = session
+	log.Tracef("\n\033[34mEstablished new DoQ connection\nTime: %v\n\033[0m", time.Now().Format(time.StampMilli))
 	return session, nil
 }
 

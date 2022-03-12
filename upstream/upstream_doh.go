@@ -52,7 +52,7 @@ func (p *dnsOverHTTPS) Address() string { return p.boot.URL.String() }
 
 func (p *dnsOverHTTPS) Exchange(m *dns.Msg) (*dns.Msg, error) {
 	q := m.Question[0].String()
-	log.Tracef("\nEstablishing DoH connection for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
+	log.Tracef("\n\033[34mStarting DoH exchange for: %s\nTime: %v\n\033[0m", q, time.Now().Format(time.StampMilli))
 	client, err := p.getClient()
 	if err != nil {
 		return nil, errorx.Decorate(err, "couldn't initialize HTTP client or transport")
@@ -60,7 +60,7 @@ func (p *dnsOverHTTPS) Exchange(m *dns.Msg) (*dns.Msg, error) {
 
 	logBegin(p.Address(), m)
 	r, err := p.exchangeHTTPSClient(m, client)
-	log.Tracef("\nDoH answer received for: %s\nTime: %v\n", q, time.Now().Format(time.StampMilli))
+	log.Tracef("\n\033[34mDoH answer received for: %s\nTime: %v\n\033[0m", q, time.Now().Format(time.StampMilli))
 	logFinish(p.Address(), err)
 
 	return r, err

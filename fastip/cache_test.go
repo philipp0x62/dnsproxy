@@ -2,19 +2,22 @@ package fastip
 
 import (
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
+	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestCacheAdd(t *testing.T) {
-	f := NewFastestAddr()
+	f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 	ent := cacheEntry{
 		status:      0,
 		latencyMsec: 111,
 	}
-	ip := net.ParseIP("1.1.1.1")
+
+	ip := netip.MustParseAddr("1.1.1.1")
 	f.cacheAdd(&ent, ip, fastestAddrCacheTTLSec)
 
 	// check that it's there
@@ -22,12 +25,13 @@ func TestCacheAdd(t *testing.T) {
 }
 
 func TestCacheTtl(t *testing.T) {
-	f := NewFastestAddr()
+	f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 	ent := cacheEntry{
 		status:      0,
 		latencyMsec: 111,
 	}
-	ip := net.ParseIP("1.1.1.1")
+
+	ip := netip.MustParseAddr("1.1.1.1")
 	f.cacheAdd(&ent, ip, 1)
 
 	// check that it's there
@@ -41,9 +45,9 @@ func TestCacheTtl(t *testing.T) {
 }
 
 func TestCacheAddSuccessfulOverwrite(t *testing.T) {
-	f := NewFastestAddr()
-	ip := net.ParseIP("1.1.1.1")
+	f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 
+	ip := netip.MustParseAddr("1.1.1.1")
 	f.cacheAddFailure(ip)
 
 	// check that it's there
@@ -62,9 +66,9 @@ func TestCacheAddSuccessfulOverwrite(t *testing.T) {
 }
 
 func TestCacheAddFailureNoOverwrite(t *testing.T) {
-	f := NewFastestAddr()
-	ip := net.ParseIP("1.1.1.1")
+	f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 
+	ip := netip.MustParseAddr("1.1.1.1")
 	f.cacheAddSuccessful(ip, 11)
 
 	// check that it's there
@@ -82,18 +86,20 @@ func TestCacheAddFailureNoOverwrite(t *testing.T) {
 	assert.Equal(t, uint(11), ent.latencyMsec)
 }
 
-func TestCache(t *testing.T) {
-	f := NewFastestAddr()
+// TODO(ameshkov): Actually test something.
+func TestCache(_ *testing.T) {
+	f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 	ent := cacheEntry{
 		status:      0,
 		latencyMsec: 111,
 	}
-	// f.cacheAdd(&ent, net.ParseIP("1.1.1.1"), fastestAddrCacheMinTTLSec)
-	val := packCacheEntry(&ent, 1) // ttl=1
+
+	val := packCacheEntry(&ent, 1)
 	f.ipCache.Set(net.ParseIP("1.1.1.1").To4(), val)
 	ent = cacheEntry{
 		status:      0,
 		latencyMsec: 222,
 	}
-	f.cacheAdd(&ent, net.ParseIP("2.2.2.2"), fastestAddrCacheTTLSec)
+
+	f.cacheAdd(&ent, netip.MustParseAddr("2.2.2.2"), fastestAddrCacheTTLSec)
 }

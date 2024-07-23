@@ -2,13 +2,16 @@ package fastip
 
 import (
 	"net"
+	"net/netip"
 	"runtime"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/netutil"
+	"github.com/AdguardTeam/golibs/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,7 +21,7 @@ type unit = struct{}
 
 func TestFastestAddr_PingAll_timeout(t *testing.T) {
 	t.Run("isolated", func(t *testing.T) {
-		f := NewFastestAddr()
+		f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 
 		waitCh := make(chan unit)
 		f.pinger.Control = func(_, _ string, _ syscall.RawConn) error {
@@ -27,19 +30,20 @@ func TestFastestAddr_PingAll_timeout(t *testing.T) {
 			return nil
 		}
 
-		ip := net.IP{127, 0, 0, 1}
-		res := f.pingAll("", []net.IP{ip, ip})
+		ip := netutil.IPv4Localhost()
+		res := f.pingAll("", []netip.Addr{ip, ip})
 		require.Nil(t, res)
 
 		waitCh <- unit{}
 	})
 
 	t.Run("cached", func(t *testing.T) {
-		f := NewFastestAddr()
+		f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 
 		const lat uint = 42
 
-		ip1, ip2 := net.IP{127, 0, 0, 1}, net.IP{127, 0, 0, 2}
+		ip1 := netutil.IPv4Localhost()
+		ip2 := netip.MustParseAddr("127.0.0.2")
 		f.cacheAddSuccessful(ip1, lat)
 
 		waitCh := make(chan unit)
@@ -49,7 +53,7 @@ func TestFastestAddr_PingAll_timeout(t *testing.T) {
 			return nil
 		}
 
-		res := f.pingAll("", []net.IP{ip1, ip2})
+		res := f.pingAll("", []netip.Addr{ip1, ip2})
 		require.NotNil(t, res)
 
 		assert.True(t, res.success)
@@ -61,7 +65,7 @@ func TestFastestAddr_PingAll_timeout(t *testing.T) {
 
 // assertCaching checks the cache of f for containing a connection to ip with
 // the specified status.
-func assertCaching(t *testing.T, f *FastestAddr, ip net.IP, status int) {
+func assertCaching(t *testing.T, f *FastestAddr, ip netip.Addr, status int) {
 	t.Helper()
 
 	const tickDur = pingTCPTimeout / 16
@@ -74,43 +78,43 @@ func assertCaching(t *testing.T, f *FastestAddr, ip net.IP, status int) {
 }
 
 func TestFastestAddr_PingAll_cache(t *testing.T) {
-	ip := net.IP{127, 0, 0, 1}
+	ip := netutil.IPv4Localhost()
 
 	t.Run("cached_failed", func(t *testing.T) {
-		f := NewFastestAddr()
+		f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 		f.cacheAddFailure(ip)
 
-		res := f.pingAll("", []net.IP{ip, ip})
+		res := f.pingAll("", []netip.Addr{ip, ip})
 		require.Nil(t, res)
 	})
 
-	t.Run("cached_succesfull", func(t *testing.T) {
+	t.Run("cached_successful", func(t *testing.T) {
 		const lat uint = 1
 
-		f := NewFastestAddr()
+		f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 		f.cacheAddSuccessful(ip, lat)
 
-		res := f.pingAll("", []net.IP{ip, ip})
+		res := f.pingAll("", []netip.Addr{ip, ip})
 		require.NotNil(t, res)
 		assert.True(t, res.success)
 		assert.Equal(t, lat, res.latency)
 	})
 
 	t.Run("not_cached", func(t *testing.T) {
-		listener, err := net.Listen("tcp", ":0")
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		require.NoError(t, err)
-		t.Cleanup(func() { require.NoError(t, listener.Close()) })
+		testutil.CleanupAndRequireSuccess(t, listener.Close)
 
-		ip := net.IP{127, 0, 0, 1}
-		f := NewFastestAddr()
+		ip = netutil.IPv4Localhost()
+		f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 
 		f.pingPorts = []uint{uint(listener.Addr().(*net.TCPAddr).Port)}
-		ips := []net.IP{ip, ip}
+		ips := []netip.Addr{ip, ip}
 
 		wg := &sync.WaitGroup{}
 		wg.Add(len(ips) * len(f.pingPorts))
 
-		f.pinger.Control = func(_, address string, _ syscall.RawConn) error {
+		f.pinger.Control = func(_, address string, _ syscall.RawConn) (err error) {
 			hostport, err := netutil.ParseHostPort(address)
 			require.NoError(t, err)
 
@@ -133,32 +137,31 @@ func TestFastestAddr_PingAll_cache(t *testing.T) {
 }
 
 // listen is a helper function that creates a new listener on ip for t.
-func listen(t *testing.T, ip net.IP) (port uint) {
+func listen(t *testing.T, ip netip.Addr) (port uint) {
 	t.Helper()
 
-	l, err := net.Listen("tcp", netutil.IPPort{IP: ip, Port: 0}.String())
+	l, err := net.Listen("tcp", netip.AddrPortFrom(ip, 0).String())
 	require.NoError(t, err)
-
-	t.Cleanup(func() { require.NoError(t, l.Close()) })
+	testutil.CleanupAndRequireSuccess(t, l.Close)
 
 	return uint(l.Addr().(*net.TCPAddr).Port)
 }
 
 func TestFastestAddr_PingAll(t *testing.T) {
-	ip := net.IP{127, 0, 0, 1}
+	ip := netutil.IPv4Localhost()
 
 	t.Run("single", func(t *testing.T) {
-		f := NewFastestAddr()
-		res := f.pingAll("", []net.IP{ip})
+		f := New(&Config{Logger: slogutil.NewDiscardLogger()})
+		res := f.pingAll("", []netip.Addr{ip})
 		require.NotNil(t, res)
 
 		assert.True(t, res.success)
-		assert.True(t, ip.Equal(res.ipp.IP))
+		assert.Equal(t, ip, res.addrPort.Addr())
 		// There was no ping so the port is zero.
-		assert.Zero(t, res.ipp.Port)
+		assert.Zero(t, res.addrPort.Port())
 
 		// Nothing in the cache since there was no ping.
-		ce := f.cacheFind(res.ipp.IP)
+		ce := f.cacheFind(res.addrPort.Addr())
 		require.Nil(t, ce)
 	})
 
@@ -168,17 +171,15 @@ func TestFastestAddr_PingAll(t *testing.T) {
 
 		ctrlCh := make(chan unit, 1)
 
-		f := NewFastestAddr()
+		f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 		f.pingPorts = []uint{
 			fastPort,
 			slowPort,
 		}
 		f.pinger.Control = func(_, address string, _ syscall.RawConn) error {
-			ipp, err := netutil.ParseIPPort(address)
-			require.NoError(t, err)
-
-			require.Contains(t, []uint{fastPort, slowPort}, uint(ipp.Port))
-			if ipp.Port == int(fastPort) {
+			addrPort := netip.MustParseAddrPort(address)
+			require.Contains(t, []uint{fastPort, slowPort}, uint(addrPort.Port()))
+			if addrPort.Port() == uint16(fastPort) {
 				return nil
 			}
 
@@ -187,32 +188,31 @@ func TestFastestAddr_PingAll(t *testing.T) {
 			return nil
 		}
 
-		ips := []net.IP{ip, ip}
-
+		ips := []netip.Addr{ip, ip}
 		res := f.pingAll("", ips)
 		ctrlCh <- unit{}
 
 		require.NotNil(t, res)
 
 		assert.True(t, res.success)
-		assert.True(t, ip.Equal(res.ipp.IP))
-		assert.EqualValues(t, fastPort, res.ipp.Port)
+		assert.Equal(t, ip, res.addrPort.Addr())
+		assert.EqualValues(t, fastPort, res.addrPort.Port())
 
 		assertCaching(t, f, ip, 0)
 	})
 
 	t.Run("zero", func(t *testing.T) {
-		res := NewFastestAddr().pingAll("", nil)
+		res := New(&Config{Logger: slogutil.NewDiscardLogger()}).pingAll("", nil)
 		require.Nil(t, res)
 	})
 
 	t.Run("fail", func(t *testing.T) {
 		port := getFreePort(t)
 
-		f := NewFastestAddr()
+		f := New(&Config{Logger: slogutil.NewDiscardLogger()})
 		f.pingPorts = []uint{port}
 
-		res := f.pingAll("test", []net.IP{ip, ip})
+		res := f.pingAll("test", []netip.Addr{ip, ip})
 		require.Nil(t, res)
 
 		assertCaching(t, f, ip, 1)
@@ -225,7 +225,7 @@ func TestFastestAddr_PingAll(t *testing.T) {
 func getFreePort(t *testing.T) (port uint) {
 	t.Helper()
 
-	l, err := net.Listen("tcp", ":0")
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
 	port = uint(l.Addr().(*net.TCPAddr).Port)

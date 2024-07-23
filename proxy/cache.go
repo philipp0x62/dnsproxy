@@ -1,76 +1,208 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/binary"
+	"log/slog"
 	"math"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	glcache "github.com/AdguardTeam/golibs/cache"
-	"github.com/AdguardTeam/golibs/log"
+	"github.com/AdguardTeam/golibs/mathutil"
 	"github.com/miekg/dns"
 )
 
 // defaultCacheSize is the size of cache in bytes by default.
 const defaultCacheSize = 64 * 1024
 
-// cache is used to cache requests.
+// cache is used to cache requests and used upstreams.
 type cache struct {
+	// itemsLock protects requests cache.
+	itemsLock *sync.RWMutex
+
+	// itemsWithSubnetLock protects requests cache.
+	itemsWithSubnetLock *sync.RWMutex
+
 	// items is the requests cache.
 	items glcache.Cache
-	// itemsLock protects requests cache.
-	itemsLock sync.RWMutex
 
 	// itemsWithSubnet is the requests cache.
 	itemsWithSubnet glcache.Cache
-	// itemsWithSubnetLock protects requests cache.
-	itemsWithSubnetLock sync.RWMutex
 
-	// cacheSize is the size of a key-value pair of cache.
-	cacheSize int
-	// optimistic defines if the cache should return expired items and
-	// resolve those again.
+	// optimistic defines if the cache should return expired items and resolve
+	// those again.
 	optimistic bool
 }
 
-// initCache initializes cache in case it is enabled.
+// cacheItem is a single cache entry.  It's a helper type to aggregate the
+// item-specific logic.
+type cacheItem struct {
+	// m contains the cached response.
+	m *dns.Msg
+
+	// u contains an address of the upstream which resolved m.
+	u string
+
+	// ttl is the time-to-live value for the item.  Should be set before calling
+	// [cacheItem.pack].
+	ttl uint32
+}
+
+// respToItem converts the pair of the response and upstream resolved the one
+// into item for storing it in cache.  l must not be nil.
+func (c *cache) respToItem(m *dns.Msg, u upstream.Upstream, l *slog.Logger) (item *cacheItem) {
+	ttl := cacheTTL(m, l)
+	if ttl == 0 {
+		return nil
+	}
+
+	upsAddr := ""
+	if u != nil {
+		upsAddr = u.Address()
+	}
+
+	return &cacheItem{
+		m:   m,
+		u:   upsAddr,
+		ttl: ttl,
+	}
+}
+
+const (
+	// packedMsgLenSz is the exact length of byte slice capable to store the
+	// length of packed DNS message.  It's essentially the size of a uint16.
+	packedMsgLenSz = 2
+	// expTimeSz is the exact length of byte slice capable to store the
+	// expiration time the response.  It's essentially the size of a uint32.
+	expTimeSz = 4
+
+	// minPackedLen is the minimum length of the packed cacheItem.
+	minPackedLen = expTimeSz + packedMsgLenSz
+)
+
+// pack converts the ci into bytes slice.
+func (ci *cacheItem) pack() (packed []byte) {
+	pm, _ := ci.m.Pack()
+	pmLen := len(pm)
+	packed = make([]byte, minPackedLen, minPackedLen+pmLen+len(ci.u))
+
+	// Put expiration time.
+	binary.BigEndian.PutUint32(packed, uint32(time.Now().Unix())+ci.ttl)
+
+	// Put the length of the packed message.
+	binary.BigEndian.PutUint16(packed[expTimeSz:], uint16(pmLen))
+
+	// Put the packed message itself.
+	packed = append(packed, pm...)
+
+	// Put the address of the upstream.
+	packed = append(packed, ci.u...)
+
+	return packed
+}
+
+// optimisticTTL is the default TTL for expired cached responses in seconds.
+const optimisticTTL = 10
+
+// unpackItem converts the data into cacheItem using req as a request message.
+// expired is true if the item exists but expired.  The expired cached items are
+// only returned if c is optimistic.  req must not be nil.
+func (c *cache) unpackItem(data []byte, req *dns.Msg) (ci *cacheItem, expired bool) {
+	if len(data) < minPackedLen {
+		return nil, false
+	}
+
+	b := bytes.NewBuffer(data)
+	expire := int64(binary.BigEndian.Uint32(b.Next(expTimeSz)))
+	now := time.Now().Unix()
+	var ttl uint32
+	if expired = expire <= now; expired {
+		if !c.optimistic {
+			return nil, expired
+		}
+
+		ttl = optimisticTTL
+	} else {
+		ttl = uint32(expire - now)
+	}
+
+	l := int(binary.BigEndian.Uint16(b.Next(packedMsgLenSz)))
+	if l == 0 {
+		return nil, expired
+	}
+
+	m := &dns.Msg{}
+	if m.Unpack(b.Next(l)) != nil {
+		return nil, expired
+	}
+
+	res := (&dns.Msg{}).SetRcode(req, m.Rcode)
+	res.AuthenticatedData = m.AuthenticatedData
+	res.RecursionAvailable = m.RecursionAvailable
+
+	var doBit bool
+	if o := req.IsEdns0(); o != nil {
+		doBit = o.Do()
+	}
+
+	// Don't return OPT records from cache since it's deprecated by RFC 6891.
+	// If the request has DO bit set we only remove all the OPT RRs, and also
+	// all DNSSEC RRs otherwise.
+	filterMsg(res, m, req.AuthenticatedData, doBit, ttl)
+
+	return &cacheItem{
+		m: res,
+		u: string(b.Next(b.Len())),
+	}, expired
+}
+
+// CacheLogPrefix is a prefix for logging cache operations.
+const CacheLogPrefix = "cache"
+
+// initCache initializes cache if it's enabled.
 func (p *Proxy) initCache() {
 	if !p.CacheEnabled {
+		p.logger.Info("cache disabled")
+
 		return
 	}
 
-	log.Printf("DNS cache is enabled")
+	size := p.CacheSizeBytes
+	p.logger.Info("cache enabled", "size", size)
 
-	c := &cache{
-		optimistic: p.CacheOptimistic,
-		cacheSize:  p.CacheSizeBytes,
-	}
-	p.cache = c
-	c.initLazy()
-	if p.EnableEDNSClientSubnet {
-		c.initLazyWithSubnet()
-	}
-
-	p.shortFlighter = newOptimisticResolver(
-		p.replyFromUpstream,
-		p.setInCache,
-		c.Delete,
-	)
-	p.shortFlighterWithSubnet = newOptimisticResolver(
-		p.replyFromUpstream,
-		p.setInCache,
-		c.DeleteWithSubnet,
-	)
+	p.cache = newCache(size, p.EnableEDNSClientSubnet, p.CacheOptimistic)
+	p.shortFlighter = newOptimisticResolver(p)
 }
 
-// Get returns cached *dns.Msg if it's found.  Nil otherwise.
-func (c *cache) Get(req *dns.Msg) (res *dns.Msg, expired bool, key []byte) {
+// newCache returns a properly initialized cache.  logger must not be nil.
+func newCache(size int, withECS, optimistic bool) (c *cache) {
+	c = &cache{
+		itemsLock:           &sync.RWMutex{},
+		itemsWithSubnetLock: &sync.RWMutex{},
+		items:               createCache(size),
+		optimistic:          optimistic,
+	}
+
+	if withECS {
+		c.itemsWithSubnet = createCache(size)
+	}
+
+	return c
+}
+
+// get returns cached item for the req if it's found.  expired is true if the
+// item's TTL is expired.  key is the resulting key for req.  It's returned to
+// avoid recalculating it afterwards.
+func (c *cache) get(req *dns.Msg) (ci *cacheItem, expired bool, key []byte) {
 	c.itemsLock.RLock()
 	defer c.itemsLock.RUnlock()
 
-	if c.items == nil || req == nil || len(req.Question) != 1 {
+	if !canLookUpInCache(c.items, req) {
 		return nil, false, nil
 	}
 
@@ -80,153 +212,196 @@ func (c *cache) Get(req *dns.Msg) (res *dns.Msg, expired bool, key []byte) {
 		return nil, false, key
 	}
 
-	if res, expired = unpackResponse(data, req, c.optimistic); res == nil {
+	if ci, expired = c.unpackItem(data, req); ci == nil {
 		c.items.Del(key)
 	}
 
-	return res, expired, key
+	return ci, expired, key
 }
 
-// GetWithSubnet returns cached *dns.Msg if it's found by client IP and subnet
-// mask.  Nil otherwise.  Note that a slow longest-prefix-match algorithm used,
-// so cache searches are performed up to mask+1 times.
-func (c *cache) GetWithSubnet(req *dns.Msg, cliIP net.IP, mask uint8) (
-	res *dns.Msg,
-	expired bool,
-	key []byte,
-) {
+// getWithSubnet returns cached item for the req if it's found by n.  expired
+// is true if the item's TTL is expired.  k is the resulting key for req.  It's
+// returned to avoid recalculating it afterwards.
+//
+// Note that a slow longest-prefix-match algorithm is used, so cache searches
+// are performed up to mask+1 times.
+func (c *cache) getWithSubnet(req *dns.Msg, n *net.IPNet) (ci *cacheItem, expired bool, k []byte) {
 	c.itemsWithSubnetLock.RLock()
 	defer c.itemsWithSubnetLock.RUnlock()
 
-	if c.itemsWithSubnet == nil || req == nil || len(req.Question) != 1 {
+	if !canLookUpInCache(c.itemsWithSubnet, req) {
 		return nil, false, nil
 	}
 
-	var data []byte
-	for mask++; mask > 0 && data == nil; {
-		mask--
-		key = msgToKeyWithSubnet(req, cliIP, mask)
-		data = c.itemsWithSubnet.Get(key)
+	ecsIP := n.IP.Mask(n.Mask)
+	ipLen := len(ecsIP)
+	m, _ := n.Mask.Size()
+
+	k = msgToKeyWithSubnet(req, ecsIP, m)
+	data := c.itemsWithSubnet.Get(k)
+
+	// In order to reduce allocations we apply mask on bits level.  As the key
+	// k has ecsIP in bytes slice representation, each iteration we can just
+	// clear one bit in the end of it by applying the bitmask.
+	for bitmask := ^byte(0); m >= 0 && data == nil; m-- {
+		// Set mask identification byte in the key.
+		k[keyMaskIndex] = byte(m)
+
+		// In case mask is zero, the key doesn't have IP in it.
+		if m == 0 {
+			k = slices.Delete(k, keyIPIndex, keyIPIndex+ipLen)
+			data = c.itemsWithSubnet.Get(k)
+
+			continue
+		}
+
+		// Shift or renew bitmask.
+		if m%8 == 0 {
+			bitmask = ^byte(0)
+		} else {
+			bitmask <<= 1
+		}
+
+		// Clear the last non-zero bit in the byte of the IP address.
+		k[keyIPIndex+m/8] &= bitmask
+
+		data = c.itemsWithSubnet.Get(k)
 	}
+
 	if data == nil {
-		return nil, false, key
+		return nil, false, k
 	}
 
-	if res, expired = unpackResponse(data, req, c.optimistic); res == nil {
-		c.itemsWithSubnet.Del(key)
+	if ci, expired = c.unpackItem(data, req); ci == nil {
+		c.itemsWithSubnet.Del(k)
 	}
 
-	return res, expired, key
+	return ci, expired, k
 }
 
-// initLazy initializes the cache for requests.
-func (c *cache) initLazy() {
-	c.itemsLock.Lock()
-	defer c.itemsLock.Unlock()
-
-	if c.items == nil {
-		c.items = c.createCache()
-	}
+// canLookUpInCache returns true if these parameters could be used to make a
+// cache lookup.
+func canLookUpInCache(cache glcache.Cache, req *dns.Msg) (ok bool) {
+	return cache != nil && req != nil && len(req.Question) == 1
 }
 
-// initLazyWithSubnet initializes the cache for requests with subnets.
-func (c *cache) initLazyWithSubnet() {
-	c.itemsWithSubnetLock.Lock()
-	defer c.itemsWithSubnetLock.Unlock()
-
-	if c.itemsWithSubnet == nil {
-		c.itemsWithSubnet = c.createCache()
-	}
-}
-
-// createCache returns new Cache with predefined settings.
-func (c *cache) createCache() (glc glcache.Cache) {
-	maxSize := defaultCacheSize
-	if c.cacheSize > 0 {
-		maxSize = c.cacheSize
-	}
+// createCache returns new Cache with the given cacheSize.
+func createCache(cacheSize int) (glc glcache.Cache) {
 	conf := glcache.Config{
-		MaxSize:   uint(maxSize),
+		MaxSize:   defaultCacheSize,
 		EnableLRU: true,
+	}
+
+	if cacheSize > 0 {
+		conf.MaxSize = uint(cacheSize)
 	}
 
 	return glcache.New(conf)
 }
 
-// Set tries to add the request into cache.
-func (c *cache) Set(m *dns.Msg) {
-	if !isCacheable(m) {
+// set stores response and upstream in the cache.  l must not be nil.
+func (c *cache) set(m *dns.Msg, u upstream.Upstream, l *slog.Logger) {
+	item := c.respToItem(m, u, l)
+	if item == nil {
 		return
 	}
-
-	c.initLazy()
 
 	key := msgToKey(m)
-	data := packResponse(m)
+	packed := item.pack()
 
-	c.itemsLock.RLock()
-	defer c.itemsLock.RUnlock()
+	c.itemsLock.Lock()
+	defer c.itemsLock.Unlock()
 
-	c.items.Set(key, data)
+	c.items.Set(key, packed)
 }
 
-// SetWithSubnet tries to add the request with subnet into cache.
-func (c *cache) SetWithSubnet(m *dns.Msg, ip net.IP, mask uint8) {
-	if !isCacheable(m) {
+// setWithSubnet stores response and upstream with subnet in the cache.  The
+// given subnet mask and IP address are used to calculate the cache key.  l must
+// not be nil.
+func (c *cache) setWithSubnet(m *dns.Msg, u upstream.Upstream, subnet *net.IPNet, l *slog.Logger) {
+	item := c.respToItem(m, u, l)
+	if item == nil {
 		return
 	}
 
-	c.initLazyWithSubnet()
+	pref, _ := subnet.Mask.Size()
+	key := msgToKeyWithSubnet(m, subnet.IP.Mask(subnet.Mask), pref)
+	packed := item.pack()
 
-	key := msgToKeyWithSubnet(m, ip, mask)
-	data := packResponse(m)
+	c.itemsWithSubnetLock.Lock()
+	defer c.itemsWithSubnetLock.Unlock()
 
-	c.itemsWithSubnetLock.RLock()
-	defer c.itemsWithSubnetLock.RUnlock()
-
-	c.itemsWithSubnet.Set(key, data)
+	c.itemsWithSubnet.Set(key, packed)
 }
 
-// isCacheable checks if m is valid to be cached.  For negative answers it
-// follows RFC 2308 on how to cache NXDOMAIN and NODATA kinds of responses.
+// clearItems empties the simple cache.
+func (c *cache) clearItems() {
+	c.itemsLock.Lock()
+	defer c.itemsLock.Unlock()
+
+	c.items.Clear()
+}
+
+// clearItemsWithSubnet empties the subnet cache, if any.
+func (c *cache) clearItemsWithSubnet() {
+	if c.itemsWithSubnet == nil {
+		// ECS disabled, return immediately.
+		return
+	}
+
+	c.itemsWithSubnetLock.Lock()
+	defer c.itemsWithSubnetLock.Unlock()
+
+	c.itemsWithSubnet.Clear()
+}
+
+// cacheTTL returns the number of seconds for which m is valid to be cached.
+// For negative answers it follows RFC 2308 on how to cache NXDOMAIN and NODATA
+// kinds of responses.  l must not be nil.
 //
 // See https://datatracker.ietf.org/doc/html/rfc2308#section-2.1,
 // https://datatracker.ietf.org/doc/html/rfc2308#section-2.2.
-func isCacheable(m *dns.Msg) bool {
+func cacheTTL(m *dns.Msg, l *slog.Logger) (ttl uint32) {
 	switch {
 	case m == nil:
-		return false
+		return 0
 	case m.Truncated:
-		log.Tracef("refusing to cache truncated message")
+		l.Debug("truncated message; not caching")
 
-		return false
+		return 0
 	case len(m.Question) != 1:
-		log.Tracef("refusing to cache message with wrong number of questions")
+		l.Debug("message with wrong number of questions; not caching")
 
-		return false
-	case lowestTTL(m) == 0:
-		return false
+		return 0
+	default:
+		ttl = calculateTTL(m)
+		if ttl == 0 {
+			l.Debug("ttl calculated to be 0; not caching")
+
+			return 0
+		}
 	}
 
-	qName := m.Question[0].Name
 	switch rcode := m.Rcode; rcode {
 	case dns.RcodeSuccess:
-		if qType := m.Question[0].Qtype; qType != dns.TypeA && qType != dns.TypeAAAA {
-			return true
+		if isCacheableSucceded(m) {
+			return ttl
 		}
 
-		return hasIPAns(m) || isCacheableNegative(m)
+		l.Debug("not a cacheable noerror response; not caching")
 	case dns.RcodeNameError:
-		return isCacheableNegative(m)
-	default:
-		log.Tracef(
-			"%s: refusing to cache message with response code %s",
-			qName,
-			dns.RcodeToString[rcode],
-		)
+		if isCacheableNegative(m) {
+			return ttl
+		}
 
-		return false
+		l.Debug("not a cacheable nxdomain response; not caching")
+	case dns.RcodeServerFailure:
+		return ttl
+	default:
+		l.Debug("response code %s; not caching", "rcode", dns.RcodeToString[rcode])
 	}
+
+	return 0
 }
 
 // hasIPAns check the m for containing at least one A or AAAA RR in answer
@@ -239,6 +414,14 @@ func hasIPAns(m *dns.Msg) (ok bool) {
 	}
 
 	return false
+}
+
+// isCacheableSucceded returns true if m contains useful data to be cached
+// treating it as a successful response.
+func isCacheableSucceded(m *dns.Msg) (ok bool) {
+	qType := m.Question[0].Qtype
+
+	return (qType != dns.TypeA && qType != dns.TypeAAAA) || hasIPAns(m) || isCacheableNegative(m)
 }
 
 // isCacheableNegative returns true if m's header has at least a single SOA RR
@@ -262,22 +445,38 @@ func isCacheableNegative(m *dns.Msg) (ok bool) {
 	return ok
 }
 
-// lowestTTL returns the lowest TTL in m's RRs or 0 if the information is
-// absent.
-func lowestTTL(m *dns.Msg) (ttl uint32) {
-	ttl = math.MaxUint32
+// ServFailMaxCacheTTL is the maximum time-to-live value for caching
+// SERVFAIL responses in seconds.  It's consistent with the upper constraint
+// of 5 minutes given by RFC 2308.
+//
+// See https://datatracker.ietf.org/doc/html/rfc2308#section-7.1.
+const ServFailMaxCacheTTL = 30
 
+// calculateTTL returns the number of seconds for which m could be cached.  It's
+// usually the lowest TTL among all m's resource records.  It returns 0 if m
+// isn't cacheable according to it's contents.
+func calculateTTL(m *dns.Msg) (ttl uint32) {
+	// Use the maximum value as a guard value.  If the inner loop is entered,
+	// it's going to be rewritten with an actual TTL value that is lower than
+	// MaxUint32.  If the inner loop isn't entered, catch that and return zero.
+	ttl = math.MaxUint32
 	for _, rrset := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
-		for _, r := range rrset {
-			ttl = minTTL(r.Header(), ttl)
+		for _, rr := range rrset {
+			ttl = minTTL(rr.Header(), ttl)
+			if ttl == 0 {
+				return 0
+			}
 		}
 	}
 
-	if ttl == math.MaxUint32 {
+	switch {
+	case m.Rcode == dns.RcodeServerFailure && ttl > ServFailMaxCacheTTL:
+		return ServFailMaxCacheTTL
+	case ttl == math.MaxUint32:
 		return 0
+	default:
+		return ttl
 	}
-
-	return ttl
 }
 
 // minTTL returns the minimum of h's ttl and the passed ttl.
@@ -294,7 +493,7 @@ func minTTL(h *dns.RR_Header, ttl uint32) uint32 {
 
 // Updates a given TTL to fall within the range specified by the cacheMinTTL and
 // cacheMaxTTL settings.
-func respectTTLOverrides(ttl uint32, cacheMinTTL uint32, cacheMaxTTL uint32) uint32 {
+func respectTTLOverrides(ttl, cacheMinTTL, cacheMaxTTL uint32) uint32 {
 	if ttl < cacheMinTTL {
 		return cacheMinTTL
 	}
@@ -306,67 +505,64 @@ func respectTTLOverrides(ttl uint32, cacheMinTTL uint32, cacheMaxTTL uint32) uin
 	return ttl
 }
 
-// uint16sz is the size of uint16 type in bytes.
-const uint16sz = 2
-
 // msgToKey constructs the cache key from type, class and question's name of m.
 func msgToKey(m *dns.Msg) (b []byte) {
 	q := m.Question[0]
 	name := q.Name
-	b = make([]byte, uint16sz+uint16sz+len(name))
+	b = make([]byte, packedMsgLenSz+packedMsgLenSz+len(name))
 
 	// Put QTYPE, QCLASS, and QNAME.
 	binary.BigEndian.PutUint16(b, q.Qtype)
-	binary.BigEndian.PutUint16(b[uint16sz:], q.Qclass)
-	copy(b[2*uint16sz:], strings.ToLower(name))
+	binary.BigEndian.PutUint16(b[packedMsgLenSz:], q.Qclass)
+	copy(b[2*packedMsgLenSz:], strings.ToLower(name))
 
 	return b
 }
 
+const (
+	// keyMaskIndex is the index of the byte with mask ones value.
+	keyMaskIndex = 1 + 2*packedMsgLenSz
+
+	// keyIPIndex is the start index of the IP address in the key.
+	keyIPIndex = keyMaskIndex + 1
+)
+
 // msgToKeyWithSubnet constructs the cache key from DO bit, type, class, subnet
-// mask, client's IP address and question's name of m.
-func msgToKeyWithSubnet(m *dns.Msg, ip net.IP, mask uint8) []byte {
+// mask, client's IP address and question's name of m.  ecsIP is expected to be
+// masked already.
+func msgToKeyWithSubnet(m *dns.Msg, ecsIP net.IP, mask int) (key []byte) {
 	q := m.Question[0]
-	cap := 1 + 2 + 2 + 1 + len(q.Name)
-	if mask != 0 {
-		cap += len(ip)
+	keyLen := keyIPIndex + len(q.Name)
+	masked := mask != 0
+	if masked {
+		keyLen += len(ecsIP)
 	}
 
-	// init the array
-	b := make([]byte, cap)
-	k := 0
+	// Initialize the slice.
+	key = make([]byte, keyLen)
 
-	// put do
+	// Put DO.
 	opt := m.IsEdns0()
-	do := false
-	if opt != nil {
-		do = opt.Do()
-	}
-	if do {
-		b[k] = 1
-	} else {
-		b[k] = 0
-	}
-	k++
+	key[0] = mathutil.BoolToNumber[byte](opt != nil && opt.Do())
 
-	// put qtype
-	binary.BigEndian.PutUint16(b[:], q.Qtype)
-	k += 2
+	// Put Qtype.
+	//
+	// TODO(d.kolyshev): We should put Qtype in key[1:].
+	binary.BigEndian.PutUint16(key[:], q.Qtype)
 
-	// put qclass
-	binary.BigEndian.PutUint16(b[k:], q.Qclass)
-	k += 2
+	// Put Qclass.
+	binary.BigEndian.PutUint16(key[1+packedMsgLenSz:], q.Qclass)
 
-	// add mask
-	b[k] = mask
-	k++
-	if mask != 0 {
-		copy(b[k:], ip)
-		k += len(ip)
+	// Add mask.
+	key[keyMaskIndex] = uint8(mask)
+	k := keyIPIndex
+	if masked {
+		k += copy(key[keyIPIndex:], ecsIP)
 	}
 
-	copy(b[k:], strings.ToLower(q.Name))
-	return b
+	copy(key[k:], strings.ToLower(q.Name))
+
+	return key
 }
 
 // isDNSSEC returns true if r is a DNSSEC RR.  NSEC, NSEC3, DS, DNSKEY and
@@ -412,27 +608,13 @@ func filterRRSlice(rrs []dns.RR, do bool, ttl uint32, except uint16) (filtered [
 	return rs[:j]
 }
 
-// packResponse turns m into a byte slice where first 4 bytes contain the expire
-// value.
-func packResponse(m *dns.Msg) []byte {
-	pm, _ := m.Pack()
-	actualTTL := lowestTTL(m)
-	expire := uint32(time.Now().Unix()) + actualTTL
-	d := make([]byte, 4+len(pm))
-	binary.BigEndian.PutUint32(d, expire)
-	copy(d[4:], pm)
-
-	return d
-}
-
 // filterMsg removes OPT RRs, DNSSEC RRs if do is false, sets TTL to ttl if it's
 // not equal to 0 and puts the results to appropriate fields of dst.  It also
 // filters the AD bit if both ad and do are false.
 func filterMsg(dst, m *dns.Msg, ad, do bool, ttl uint32) {
-	// As RFC-6840 (https://tools.ietf.org/html/rfc6840) says, validating
-	// resolvers should only set the AD bit when a response both meets the
-	// conditions listed in RFC-4035 (https://tools.ietf.org/html/rfc4035),
-	// and the request contained either a set DO bit or a set AD bit.
+	// As RFC 6840 says, validating resolvers should only set the AD bit when a
+	// response both meets the conditions listed in RFC 4035, and the request
+	// contained either a set DO bit or a set AD bit.
 	dst.AuthenticatedData = dst.AuthenticatedData && (ad || do)
 
 	// It's important to filter out only DNSSEC RRs that aren't explicitly
@@ -443,72 +625,4 @@ func filterMsg(dst, m *dns.Msg, ad, do bool, ttl uint32) {
 	dst.Answer = filterRRSlice(m.Answer, do, ttl, m.Question[0].Qtype)
 	dst.Ns = filterRRSlice(m.Ns, do, ttl, dns.TypeNone)
 	dst.Extra = filterRRSlice(m.Extra, do, ttl, dns.TypeNone)
-}
-
-// optimisticTTL is the default TTL for expired cached response.
-const optimisticTTL = 60
-
-// unpackResponse returns the unpacked response if it exists.  The returnExpired
-// controls whether or not the expired response should be omitted.
-func unpackResponse(data []byte, req *dns.Msg, returnExpired bool) (res *dns.Msg, expired bool) {
-	expire := binary.BigEndian.Uint32(data[:4])
-	now := time.Now().Unix()
-	var ttl uint32
-	if int64(expire) <= now {
-		expired = true
-		if !returnExpired {
-			return nil, expired
-		}
-
-		ttl = optimisticTTL
-	} else {
-		ttl = expire - uint32(now)
-	}
-
-	m := &dns.Msg{}
-	if m.Unpack(data[4:]) != nil {
-		return nil, expired
-	}
-
-	adBit := req.AuthenticatedData
-	var doBit bool
-	if o := req.IsEdns0(); o != nil {
-		doBit = o.Do()
-	}
-
-	res = &dns.Msg{}
-	res.SetReply(req)
-	res.AuthenticatedData = m.AuthenticatedData
-	res.RecursionAvailable = m.RecursionAvailable
-	res.Rcode = m.Rcode
-
-	// Don't return OPT records from cache since it's deprecated by RFC-6891
-	// (https://tools.ietf.org/html/rfc6891).
-	// Also, if the request has DO bit set we only remove all the OPT
-	// RRs, and also all DNSSEC RRs otherwise.
-	filterMsg(res, m, adBit, doBit, ttl)
-
-	return res, expired
-}
-
-func (c *cache) Delete(key []byte) {
-	c.itemsLock.RLock()
-	defer c.itemsLock.RUnlock()
-
-	if c.items == nil {
-		return
-	}
-
-	c.items.Del(key)
-}
-
-func (c *cache) DeleteWithSubnet(key []byte) {
-	c.itemsWithSubnetLock.RLock()
-	defer c.itemsWithSubnetLock.RUnlock()
-
-	if c.itemsWithSubnet == nil {
-		return
-	}
-
-	c.itemsWithSubnet.Del(key)
 }

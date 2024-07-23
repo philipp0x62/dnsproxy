@@ -1,18 +1,26 @@
+// Package fastip implements the algorithm that allows to query multiple
+// resolvers, ping all IP addresses that were returned, and return the fastest
+// one among them.
 package fastip
 
 import (
+	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/AdguardTeam/golibs/log"
-
-	"github.com/AdguardTeam/dnsproxy/proxyutil"
 	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/cache"
+	"github.com/AdguardTeam/golibs/container"
+	"github.com/AdguardTeam/golibs/logutil/slogutil"
+	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/miekg/dns"
 )
+
+// LogPrefix is a prefix for logging.
+const LogPrefix = "fastip"
 
 // DefaultPingWaitTimeout is the default period of time for waiting ping
 // operations to finish.
@@ -20,119 +28,173 @@ const DefaultPingWaitTimeout = 1 * time.Second
 
 // FastestAddr provides methods to determine the fastest network addresses.
 type FastestAddr struct {
+	// logger is used for logging during the process.  It is never nil.
+	logger *slog.Logger
+
+	// pinger is the dialer with predefined timeout for pinging TCP connections.
+	pinger *net.Dialer
+
 	// ipCacheLock protects ipCache.
-	ipCacheLock sync.Mutex
+	ipCacheLock *sync.Mutex
+
 	// ipCache caches fastest IP addresses.
 	ipCache cache.Cache
-
-	// pinger is the dialer with predefined timeout for pinging TCP
-	// connections.
-	pinger *net.Dialer
 
 	// pingPorts are the ports to ping on.
 	pingPorts []uint
 
-	// PingWaitTimeout is the timeout for waiting all the resolved addresses
-	// are pinged.  Any ping results received after it are cached but not
-	// used at the moment.  It should be configured right after the
-	// FastestAddr initialization since it isn't protected for concurrent
-	// usage.
-	PingWaitTimeout time.Duration
+	// pingWaitTimeout is the timeout for waiting all the resolved addresses to
+	// be pinged.  Any ping results received after that moment are cached, but
+	// won't be used.
+	pingWaitTimeout time.Duration
 }
 
-// NewFastestAddr initializes a new instance of the *FastestAddr.
+// NewFastestAddr initializes a new instance of *FastestAddr.
+//
+// Deprecated: Use [New] instead.
 func NewFastestAddr() (f *FastestAddr) {
 	return &FastestAddr{
+		logger:      slog.Default().With(slogutil.KeyPrefix, LogPrefix),
+		ipCacheLock: &sync.Mutex{},
 		ipCache: cache.New(cache.Config{
 			MaxSize:   64 * 1024,
 			EnableLRU: true,
 		}),
 		pingPorts:       []uint{80, 443},
-		PingWaitTimeout: DefaultPingWaitTimeout,
+		pingWaitTimeout: DefaultPingWaitTimeout,
 		pinger:          &net.Dialer{Timeout: pingTCPTimeout},
 	}
 }
 
-// ExchangeFastest queries each specified upstream and returns a response with
-// the fastest IP address.  The fastest IP address is cosidered to be the first
+// Config contains all the fields necessary for proxy configuration.
+type Config struct {
+	// Logger is used as the base logger for the service.  If nil,
+	// [slog.Default] with [LogPrefix] is used.
+	Logger *slog.Logger
+
+	// PingWaitTimeout is the timeout for waiting all the resolved addresses to
+	// be pinged.  Any ping results received after that moment are cached, but
+	// won't be used.  If zero, [DefaultPingWaitTimeout] is used.
+	PingWaitTimeout time.Duration
+}
+
+// New initializes a new instance of *FastestAddr.
+func New(c *Config) (f *FastestAddr) {
+	f = &FastestAddr{
+		ipCacheLock: &sync.Mutex{},
+		ipCache: cache.New(cache.Config{
+			MaxSize:   64 * 1024,
+			EnableLRU: true,
+		}),
+		pingPorts: []uint{80, 443},
+		pinger:    &net.Dialer{Timeout: pingTCPTimeout},
+	}
+
+	if c.PingWaitTimeout > 0 {
+		f.pingWaitTimeout = c.PingWaitTimeout
+	} else {
+		f.pingWaitTimeout = DefaultPingWaitTimeout
+	}
+
+	if c.Logger != nil {
+		f.logger = c.Logger
+	} else {
+		f.logger = slog.Default().With(slogutil.KeyPrefix, LogPrefix)
+	}
+
+	return f
+}
+
+// ExchangeFastest queries each specified upstream and returns the response with
+// the fastest IP address.  The fastest IP address is considered to be the first
 // one successfully dialed and other addresses are removed from the answer.
-func (f *FastestAddr) ExchangeFastest(req *dns.Msg, ups []upstream.Upstream) (
-	resp *dns.Msg,
-	u upstream.Upstream,
-	err error,
-) {
+func (f *FastestAddr) ExchangeFastest(
+	req *dns.Msg,
+	ups []upstream.Upstream,
+) (resp *dns.Msg, u upstream.Upstream, err error) {
 	replies, err := upstream.ExchangeAll(ups, req)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	host := strings.ToLower(req.Question[0].Name)
-	ips := f.extractIPs(replies)
+	ipSet := container.NewMapSet[netip.Addr]()
+	for _, r := range replies {
+		for _, rr := range r.Resp.Answer {
+			ip := ipFromRR(rr)
+			if ip.IsValid() && !ip.IsUnspecified() {
+				ipSet.Add(ip)
+			}
+		}
+	}
 
+	ips := ipSet.Values()
+	host := strings.ToLower(req.Question[0].Name)
 	if pingRes := f.pingAll(host, ips); pingRes != nil {
 		return f.prepareReply(pingRes, replies)
 	}
 
-	log.Debug("%s: no fastest IP found, using the first response", host)
+	f.logger.Debug("no fastest ip found, using the first response", "host", host)
 
 	return replies[0].Resp, replies[0].Upstream, nil
 }
 
-// prepareReply converts replies into the DNS answer message accoding to
-// pingRes.  The returned upstreams is the one which replied with the fastest
-// address.
-func (f *FastestAddr) prepareReply(pingRes *pingResult, replies []upstream.ExchangeAllResult) (
-	m *dns.Msg,
-	u upstream.Upstream,
-	err error,
-) {
-	ip := pingRes.ipp.IP
+// prepareReply converts replies into the DNS answer message according to res.
+// The returned upstream is the one which replied with the fastest address.
+func (f *FastestAddr) prepareReply(
+	res *pingResult,
+	replies []upstream.ExchangeAllResult,
+) (resp *dns.Msg, u upstream.Upstream, err error) {
+	ip := res.addrPort.Addr()
 	for _, r := range replies {
-		if hasAns(r.Resp, ip) {
-			m = r.Resp
+		if hasInAns(r.Resp, ip) {
+			resp = r.Resp
 			u = r.Upstream
 
 			break
 		}
 	}
 
-	if m == nil {
-		log.Error("found no replies with IP %s, most likely this is a bug", ip)
+	if resp == nil {
+		f.logger.Error("found no replies, most likely this is a bug", "ip", ip)
 
+		// TODO(d.kolyshev): Consider returning error?
 		return replies[0].Resp, replies[0].Upstream, nil
 	}
 
-	// Modify the message and keep only A and AAAA records containing the
-	// fastest IP address.
-	ans := make([]dns.RR, 0, len(m.Answer))
-	for _, rr := range m.Answer {
+	filterResponseAnswer(resp, ip)
+
+	return resp, u, nil
+}
+
+// filterResponseAnswer modifies the response message, it keeps only A and AAAA
+// records with the given IP address.
+func filterResponseAnswer(resp *dns.Msg, ip netip.Addr) {
+	ans := make([]dns.RR, 0, len(resp.Answer))
+	ipBytes := ip.AsSlice()
+	for _, rr := range resp.Answer {
 		switch addr := rr.(type) {
 		case *dns.A:
-			if ip.Equal(addr.A.To4()) {
+			if addr.A.Equal(ipBytes) {
 				ans = append(ans, rr)
 			}
-
 		case *dns.AAAA:
-			if ip.Equal(addr.AAAA) {
+			if addr.AAAA.Equal(ipBytes) {
 				ans = append(ans, rr)
 			}
-
 		default:
 			ans = append(ans, rr)
 		}
 	}
 
 	// Set new answer.
-	m.Answer = ans
-
-	return m, u, nil
+	resp.Answer = ans
 }
 
-// hasAns returns true if m contains ip in its answer section.
-func hasAns(m *dns.Msg, ip net.IP) (ok bool) {
+// hasInAns returns true if m contains ip in its Answer section.
+func hasInAns(m *dns.Msg, ip netip.Addr) (ok bool) {
 	for _, rr := range m.Answer {
-		respIP := proxyutil.GetIPFromDNSRecord(rr)
-		if respIP != nil && respIP.Equal(ip) {
+		respIP := ipFromRR(rr)
+		if respIP == ip {
 			return true
 		}
 	}
@@ -140,31 +202,14 @@ func hasAns(m *dns.Msg, ip net.IP) (ok bool) {
 	return false
 }
 
-// extractIPs extracts all IP addresses from results.
-func (f *FastestAddr) extractIPs(results []upstream.ExchangeAllResult) (ips []net.IP) {
-	for _, r := range results {
-		for _, rr := range r.Resp.Answer {
-			ip := proxyutil.GetIPFromDNSRecord(rr)
-			if ip != nil && !containsIP(ips, ip) {
-				ips = append(ips, ip)
-			}
-		}
+// ipFromRR returns the IP address from rr if any.
+func ipFromRR(rr dns.RR) (ip netip.Addr) {
+	switch rr := rr.(type) {
+	case *dns.A:
+		ip, _ = netutil.IPToAddr(rr.A, netutil.AddrFamilyIPv4)
+	case *dns.AAAA:
+		ip, _ = netutil.IPToAddr(rr.AAAA, netutil.AddrFamilyIPv6)
 	}
 
-	return ips
-}
-
-// containsIP returns true if ips contains the ip.
-func containsIP(ips []net.IP, ip net.IP) (ok bool) {
-	if len(ips) == 0 {
-		return false
-	}
-
-	for _, i := range ips {
-		if i.Equal(ip) {
-			return true
-		}
-	}
-
-	return false
+	return ip
 }

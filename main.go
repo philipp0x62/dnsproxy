@@ -6,8 +6,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
-	"github.com/lucas-clemente/quic-go"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -306,48 +304,14 @@ func parseOptions() (opts *Options, exitCode int, err error) {
 	return opts, osutil.ExitCodeSuccess, nil
 }
 
-<<<<<<< HEAD
-func run(options *Options) {
-	if options.Verbose {
-		log.SetLevel(log.DEBUG)
-	}
-	if options.LogOutput != "" {
-		file, err := os.OpenFile(options.LogOutput, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-		if err != nil {
-			log.Fatalf("cannot create a log file: %s", err)
-		}
-		defer file.Close() //nolint
-		log.SetOutput(file)
-	}
-
-	// Prepare the proxy server
-	tokenStore := quic.NewLRUTokenStore(5, 50)
-	config := createProxyConfig(options, tokenStore)
-	dnsProxy := &proxy.Proxy{Config: config}
-
-	// Init DNS64 if needed
-	initDNS64(dnsProxy, options)
-
-
-	// Add extra handler if needed
-	if options.IPv6Disabled {
-		ipv6Configuration := ipv6Configuration{ipv6Disabled: options.IPv6Disabled}
-		dnsProxy.RequestHandler = ipv6Configuration.handleDNSRequest
-	}
-
-	// Start the proxy
-	err := dnsProxy.Start()
-=======
 // parseConfigFile fills options with the settings from file read by the given
 // path.
 func parseConfigFile(options *Options, confPath string) (err error) {
 	// #nosec G304 -- Trust the file path that is given in the args.
 	b, err := os.ReadFile(confPath)
->>>>>>> 07b8131547fd32bd37693ced4443374b556e5c13
 	if err != nil {
 		return fmt.Errorf("reading file: %w", err)
 	}
-	upstreamZero := config.UpstreamConfig.Upstreams[0]
 
 	err = yaml.Unmarshal(b, options)
 	if err != nil {
@@ -403,19 +367,8 @@ func runProxy(ctx context.Context, l *slog.Logger, options *Options) (err error)
 
 	// TODO(e.burkov):  Use signal handler.
 	signalChannel := make(chan os.Signal, 1)
-	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
-	infinite:
-	for {
-		sig := <-signalChannel
-		if sig == syscall.SIGUSR1 {
-			log.Info("Creating new session")
-			upstreamZero.Reset()
-		} else {
-			break infinite
-		}
-
-
-	}
+	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
+	<-signalChannel
 
 	// Stopping the proxy.
 	err = dnsProxy.Shutdown(ctx)
@@ -426,12 +379,6 @@ func runProxy(ctx context.Context, l *slog.Logger, options *Options) (err error)
 	return nil
 }
 
-<<<<<<< HEAD
-// createProxyConfig creates proxy.Config from the command line arguments
-func createProxyConfig(options *Options, tokenStore quic.TokenStore) proxy.Config {
-	// Create the config
-	config := proxy.Config{
-=======
 // runPprof runs pprof server on localhost:6060.
 func runPprof(l *slog.Logger) {
 	mux := http.NewServeMux()
@@ -477,7 +424,6 @@ func createProxyConfig(
 		RatelimitSubnetLenIPv4: options.RatelimitSubnetLenIPv4,
 		RatelimitSubnetLenIPv6: options.RatelimitSubnetLenIPv6,
 
->>>>>>> 07b8131547fd32bd37693ced4443374b556e5c13
 		Ratelimit:       options.Ratelimit,
 		CacheEnabled:    options.Cache,
 		CacheSizeBytes:  options.CacheSizeBytes,
@@ -501,14 +447,6 @@ func createProxyConfig(
 		PrivateSubnets:         netutil.SubnetSetFunc(netutil.IsLocallyServed),
 	}
 
-<<<<<<< HEAD
-	initUpstreams(&config, options, tokenStore)
-	initEDNS(&config, options)
-	initBogusNXDomain(&config, options)
-	initTLSConfig(&config, options)
-	initDNSCryptConfig(&config, options)
-	initListenAddrs(&config, options)
-=======
 	if uiStr := options.HTTPSUserinfo; uiStr != "" {
 		user, pass, ok := strings.Cut(uiStr, ":")
 		if ok {
@@ -517,7 +455,6 @@ func createProxyConfig(
 			conf.Userinfo = url.User(user)
 		}
 	}
->>>>>>> 07b8131547fd32bd37693ced4443374b556e5c13
 
 	options.initBogusNXDomain(ctx, l, conf)
 
@@ -532,23 +469,6 @@ func createProxyConfig(
 	return conf, errors.Join(errs...)
 }
 
-<<<<<<< HEAD
-// initUpstreams inits upstream-related config
-func initUpstreams(config *proxy.Config, options *Options, tokenStore quic.TokenStore) {
-	// Init upstreams
-	upstreams := loadServersList(options.Upstreams)
-	upsOpts := &upstream.Options{
-		InsecureSkipVerify: options.Insecure,
-		Bootstrap:          options.BootstrapDNS,
-		Timeout:            defaultTimeout,
-		TokenStore:			tokenStore,
-	}
-	upstreamConfig, err := proxy.ParseUpstreamsConfig(upstreams, upsOpts)
-	if err != nil {
-		log.Fatalf("error while parsing upstreams configuration: %s", err)
-	}
-	config.UpstreamConfig = upstreamConfig
-=======
 // isEmpty returns false if uc contains at least a single upstream.  uc must not
 // be nil.
 //
@@ -559,7 +479,6 @@ func isEmpty(uc *proxy.UpstreamConfig) (ok bool) {
 		len(uc.DomainReservedUpstreams) == 0 &&
 		len(uc.SpecifiedDomainUpstreams) == 0
 }
->>>>>>> 07b8131547fd32bd37693ced4443374b556e5c13
 
 // initUpstreams inits upstream-related config fields.
 //
@@ -630,11 +549,6 @@ func (opts *Options) initUpstreams(
 	if !isEmpty(fallbacks) {
 		config.Fallbacks = fallbacks
 	}
-<<<<<<< HEAD
-
-}
-=======
->>>>>>> 07b8131547fd32bd37693ced4443374b556e5c13
 
 	if opts.UpstreamMode != "" {
 		err = config.UpstreamMode.UnmarshalText([]byte(opts.UpstreamMode))

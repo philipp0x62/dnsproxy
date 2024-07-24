@@ -114,32 +114,11 @@ func ParseUpstreamsConfig(
 	return p.parse(lines)
 }
 
-		// # excludes more specific domain from reserved upstreams querying
-		if u == "#" && len(hosts) > 0 {
-			for _, host := range hosts {
-				domainReservedUpstreams[host] = nil
-			}
-		} else {
-			dnsUpstream, ok := upstreamsIndex[u]
-			if !ok {
-				// create an upstream
-				dnsUpstream, err = upstream.AddressToUpstream(
-					u,
-					&upstream.Options{
-						Bootstrap:          options.Bootstrap,
-						Timeout:            options.Timeout,
-						InsecureSkipVerify: options.InsecureSkipVerify,
-						TokenStore: 		options.TokenStore,
-					})
-				if err != nil {
-					err = fmt.Errorf("cannot prepare the upstream %s (%s): %s", l, options.Bootstrap, err)
-					return &UpstreamConfig{}, err
-				}
 // ParseError is an error which contains an index of the line of the upstream
 // list.
-//type ParseError struct {
+type ParseError struct {
 	// err is the original error.
-	//err error
+	err error
 
 	// Idx is an index of the lines.  See [ParseUpstreamsConfig].
 	Idx int

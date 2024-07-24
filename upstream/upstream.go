@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"github.com/lucas-clemente/quic-go"
 	"net"
 	"net/netip"
 	"net/url"
@@ -44,9 +43,6 @@ type Upstream interface {
 
 	// Closer used to close the upstreams properly.
 	io.Closer
-	//Exchange(m *dns.Msg) (*dns.Msg, error)
-	//Address() string
-	Reset()
 }
 
 // QUICTraceFunc is a function that returns a [logging.ConnectionTracer]
@@ -107,8 +103,6 @@ type Options struct {
 	// PreferIPv6 tells the bootstrapper to prefer IPv6 addresses for an
 	// upstream.
 	PreferIPv6 bool
-
-	TokenStore quic.TokenStore
 }
 
 // Clone copies o to a new struct.  Note, that this is not a deep clone.
@@ -266,19 +260,6 @@ func urlToUpstream(uu *url.URL, opts *Options) (u Upstream, err error) {
 		return newPlain(uu, opts)
 	case "quic":
 		return newDoQ(uu, opts)
-		//if upstreamURL.Port() == "" {
-			// https://datatracker.ietf.org/doc/html/draft-ietf-dprive-dnsoquic-02#section-10.2.1
-			// Early experiments MAY use port 8853. This port is marked in the IANA registry as unassigned.
-			// (Note that prior to version -02 of this draft, experiments were directed to use port 784.)
-		//	upstreamURL.Host += ":8853"
-		//}
-
-		//b, err := urlToBoot(upstreamURL, opts)
-		//if err != nil {
-		//	return nil, errorx.Decorate(err, "couldn't create quic bootstrapper")
-		//}
-		r//eturn &dnsOverQUIC{boot: b, tokenStore: opts.TokenStore}, nil
-
 	case "tls":
 		return newDoT(uu, opts)
 	case "h3", "https":

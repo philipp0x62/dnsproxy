@@ -17,7 +17,7 @@ qlogs.txt
 build
 dnsproxy
 dnsproxy.exe
-example.crt
-example.key
+*.crt
+*.key
 coverage.txt
 config.yaml
